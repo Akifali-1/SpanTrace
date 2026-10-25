@@ -108,3 +108,16 @@ def test_failed_child_is_not_hidden_by_successful_workflow_completion(client, pr
     run = client.get("/v1/runs/failed-child", headers=headers).json()
     assert run["status"] == "failed"
     assert run["graph"]["edges"][0]["from"] == "root-start"
+
+
+def test_late_root_event_repairs_run_name_and_metadata(client, project):
+    headers = auth(project)
+    now = datetime.now(timezone.utc)
+    events = [
+        event("child-first", trace_id="late-root", event_type="agent_span", span_id="child", parent_span_id="root", metadata={"run_name": None}, occurred_at=now.isoformat()),
+        event("root-late", trace_id="late-root", event_type="run_started", kind="workflow", status="running", span_id="root", metadata={"run_name": "late-root-workflow"}, occurred_at=(now + timedelta(milliseconds=1)).isoformat()),
+    ]
+    assert client.post("/v1/ingest/events", headers=headers, json={"events": events}).status_code == 200
+    run = client.get("/v1/runs/late-root", headers=headers).json()
+    assert run["name"] == "late-root-workflow"
+    assert run["metadata"]["run_name"] == "late-root-workflow"

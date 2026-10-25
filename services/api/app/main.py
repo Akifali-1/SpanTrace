@@ -75,6 +75,10 @@ def sync_run_from_event(db: Session, project: Project, event: Any) -> Run:
         run = Run(project_id=project.id, trace_id=event.trace_id, name=run_name_from_event(event), started_at=event.occurred_at)
         db.add(run)
         db.flush()
+    elif run.name == event.trace_id and run_name_from_event(event) != event.trace_id:
+        run.name = run_name_from_event(event)
+    if event.metadata:
+        run.metadata_json = {**(run.metadata_json or {}), **event.metadata}
     if event.occurred_at < run.started_at:
         run.started_at = event.occurred_at
     if event.event_type == "run_completed":
@@ -206,7 +210,8 @@ def get_run(trace_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Run not found.")
     incidents = evaluate_incidents(run.events)
     result = serialize_run(run, incidents)
-    ordered_events = sorted(run.events, key=lambda item: item.occurred_at)
+    lifecycle_order = {"run_started": 0, "run_completed": 2}
+    ordered_events = sorted(run.events, key=lambda item: (item.occurred_at, lifecycle_order.get(item.event_type, 1)))
     result["events"] = [serialize_event(event) for event in ordered_events]
     result["graph"] = build_execution_graph(ordered_events)
     return result

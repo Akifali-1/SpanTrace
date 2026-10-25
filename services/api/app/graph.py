@@ -29,7 +29,8 @@ def build_execution_graph(events: Iterable[Any]) -> dict[str, Any]:
     same trace. Handoffs without a target span ID remain unresolved rather than
     being guessed from temporal proximity.
     """
-    ordered = sorted(events, key=lambda item: item.occurred_at)
+    lifecycle_order = {"run_started": 0, "run_completed": 2}
+    ordered = sorted(events, key=lambda item: (item.occurred_at, lifecycle_order.get(item.event_type, 1)))
     nodes = [_event_node(event) for event in ordered]
     span_nodes: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for node in nodes:
