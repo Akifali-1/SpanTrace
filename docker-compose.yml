@@ -15,8 +15,8 @@ services:
       context: .
       dockerfile: services/api/Dockerfile
     environment:
-      AGENTSCOPE_DATABASE_URL: postgresql+psycopg://agentscope:agentscope@postgres:5432/agentscope
-      AGENTSCOPE_CORS_ORIGINS: http://localhost:3070
+      SPANTRACE_DATABASE_URL: postgresql+psycopg://agentscope:agentscope@postgres:5432/agentscope
+      SPANTRACE_CORS_ORIGINS: http://localhost:3070
     ports:
       - "8070:8000"
     depends_on:

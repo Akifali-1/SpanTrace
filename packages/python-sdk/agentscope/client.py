@@ -16,7 +16,21 @@ _current_trace: contextvars.ContextVar[Trace | None] = contextvars.ContextVar("a
 _current_span: contextvars.ContextVar[Span | None] = contextvars.ContextVar("agentscope_span", default=None)
 
 
-SENSITIVE_KEYS = {"password", "passwd", "secret", "token", "api_key", "authorization", "cookie", "card_number"}
+SENSITIVE_KEYS = {
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "set_cookie",
+    "card_number",
+    "client_secret",
+    "access_token",
+    "refresh_token",
+}
 
 
 def _utc_now() -> datetime:
@@ -49,6 +63,9 @@ class AgentScope:
         batch_size: int = 20,
         timeout: float = 5.0,
         redactor: Callable[[Any], Any] | None = None,
+        capture_inputs: bool | None = None,
+        capture_outputs: bool | None = None,
+        max_payload_bytes: int = 65_536,
     ) -> None:
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/")
@@ -58,23 +75,30 @@ class AgentScope:
         self.batch_size = max(1, batch_size)
         self.timeout = timeout
         self.redactor = redactor or default_redactor
+        self.capture_inputs = capture_payloads if capture_inputs is None else capture_inputs
+        self.capture_outputs = capture_payloads if capture_outputs is None else capture_outputs
+        self.max_payload_bytes = max(1_024, max_payload_bytes)
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.RLock()
+        self._seen_event_ids: set[str] = set()
         self.last_error: Exception | None = None
         self.disabled = not bool(api_key)
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "AgentScope":
-        capture = os.getenv("AGENTSCOPE_CAPTURE_PAYLOADS", "true").lower() not in {"0", "false", "no"}
-        strict = os.getenv("AGENTSCOPE_STRICT", "false").lower() in {"1", "true", "yes"}
+        def env(name: str, fallback: str | None = None) -> str | None:
+            return os.getenv(name, os.getenv(name.replace("SPANTRACE_", "AGENTSCOPE_"), fallback))
+
+        capture = (env("SPANTRACE_CAPTURE_PAYLOADS", "true") or "true").lower() not in {"0", "false", "no"}
+        strict = (env("SPANTRACE_STRICT", "false") or "false").lower() in {"1", "true", "yes"}
         return cls(
-            api_key=os.getenv("AGENTSCOPE_API_KEY"),
-            endpoint=os.getenv("AGENTSCOPE_API_URL", "http://localhost:8070"),
-            project_id=os.getenv("AGENTSCOPE_PROJECT_ID"),
+            api_key=env("SPANTRACE_API_KEY"),
+            endpoint=env("SPANTRACE_API_URL", "http://localhost:8070") or "http://localhost:8070",
+            project_id=env("SPANTRACE_PROJECT_ID"),
             capture_payloads=capture,
             strict=strict,
-            batch_size=int(os.getenv("AGENTSCOPE_BATCH_SIZE", "20")),
-            timeout=float(os.getenv("AGENTSCOPE_TIMEOUT", "5")),
+            batch_size=int(env("SPANTRACE_BATCH_SIZE", "20") or "20"),
+            timeout=float(env("SPANTRACE_TIMEOUT", "5") or "5"),
             **overrides,
         )
 
@@ -98,24 +122,48 @@ class AgentScope:
         return decorator
 
     def _prepare(self, value: Any) -> Any:
+        if value is None:
+            return None
         if not self.capture_payloads:
             return {"captured": False} if value is not None else None
         try:
-            return self.redactor(value)
+            prepared = self.redactor(value)
+            if len(json.dumps(prepared, default=str).encode("utf-8")) > self.max_payload_bytes:
+                return {"captured": True, "truncated": True, "max_bytes": self.max_payload_bytes}
+            return prepared
         except Exception:
             return "[UNSERIALIZABLE]"
 
-    def _queue(self, event: dict[str, Any]) -> None:
+    def emit(self, event: dict[str, Any]) -> None:
+        """Queue one normalized event, deduplicating stable adapter event IDs."""
         if self.disabled:
             return
-        event["input"] = self._prepare(event.get("input"))
-        event["output"] = self._prepare(event.get("output"))
-        event["tool_args"] = self._prepare(event.get("tool_args"))
-        event["tool_result"] = self._prepare(event.get("tool_result"))
+        event = dict(event)
+        event_id = str(event.get("event_id") or uuid4())
+        with self._lock:
+            if event_id in self._seen_event_ids:
+                return
+            self._seen_event_ids.add(event_id)
+        event["event_id"] = event_id
+        event["schema_version"] = event.get("schema_version", "1.1")
+        event["integration"] = event.get("integration", "manual")
+        try:
+            metadata = self.redactor(event.get("metadata") or {})
+            if len(json.dumps(metadata, default=str).encode("utf-8")) > self.max_payload_bytes:
+                metadata = {"truncated": True, "max_bytes": self.max_payload_bytes}
+        except Exception:
+            metadata = {"unserializable": True}
+        event["metadata"] = metadata
+        event["input"] = self._prepare(event.get("input")) if self.capture_inputs else ({"captured": False} if event.get("input") is not None else None)
+        event["output"] = self._prepare(event.get("output")) if self.capture_outputs else ({"captured": False} if event.get("output") is not None else None)
+        event["tool_args"] = self._prepare(event.get("tool_args")) if self.capture_inputs else ({"captured": False} if event.get("tool_args") is not None else None)
+        event["tool_result"] = self._prepare(event.get("tool_result")) if self.capture_outputs else ({"captured": False} if event.get("tool_result") is not None else None)
         with self._lock:
             self._buffer.append(event)
             if len(self._buffer) >= self.batch_size:
                 self.flush()
+
+    _queue = emit
 
     def flush(self) -> None:
         if self.disabled:
@@ -148,6 +196,20 @@ class AgentScope:
 
     close = shutdown
 
+    def instrument_opentelemetry(self, *, service_name: str = "spantrace-workflow", framework: str = "opentelemetry"):
+        """Create an OpenTelemetry provider exporting completed spans to SpanTrace.
+
+        The OpenTelemetry dependency is optional at import time. Calling this
+        method without the integration dependency installed raises a focused
+        error. The returned provider is not installed globally so applications
+        retain control over provider scope.
+        """
+        from .integrations.opentelemetry import OpenTelemetryAdapter
+
+        adapter = OpenTelemetryAdapter(self, framework=framework)
+        provider = adapter.create_provider(service_name=service_name)
+        return provider, adapter
+
 
 class Trace:
     def __init__(self, scope: AgentScope, name: str, *, trace_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
@@ -166,8 +228,11 @@ class Trace:
         self.record("run_started", kind="workflow", status="running", metadata=self.metadata)
         return self
 
+    async def __aenter__(self) -> "Trace":
+        return self.__enter__()
+
     def __exit__(self, exc_type, exc, tb) -> bool:
-        status = "failed" if exc else "succeeded"
+        status = "cancelled" if exc_type and exc_type.__name__ == "CancelledError" else ("failed" if exc else "succeeded")
         if exc:
             self.record(
                 "exception",
@@ -184,11 +249,17 @@ class Trace:
         self.scope.flush()
         return False
 
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return self.__exit__(exc_type, exc, tb)
+
     def span(self, name: str, *, kind: str = "agent", input: Any = None, metadata: dict[str, Any] | None = None) -> "Span":
         return Span(self, name, kind=kind, input=input, metadata=metadata)
 
     def tool(self, name: str, *, args: Any = None, metadata: dict[str, Any] | None = None) -> "Span":
         return Span(self, name, kind="tool", event_type="tool_call", tool_name=name, tool_args=args, metadata=metadata)
+
+    def model(self, name: str, *, input: Any = None, metadata: dict[str, Any] | None = None) -> "Span":
+        return Span(self, name, kind="model", event_type="model_call", model_name=name, input=input, metadata=metadata)
 
     def handoff(self, to_agent: str, *, from_agent: str | None = None, metadata: dict[str, Any] | None = None) -> None:
         current = _current_span.get()
@@ -200,6 +271,7 @@ class Trace:
             parent_span_id=current.span_id if current else None,
             handoff_to=to_agent,
             metadata=metadata,
+            relationship="handoff",
         )
 
     def record(self, event_type: str, *, kind: str = "workflow", status: str = "succeeded", **fields: Any) -> None:
@@ -207,8 +279,8 @@ class Trace:
         occurred_at = fields.pop("occurred_at", None) or _utc_now()
         ended_at = fields.pop("ended_at", None)
         event = {
-            "schema_version": "1.0",
-            "event_id": str(uuid4()),
+            "schema_version": "1.1",
+            "event_id": fields.pop("event_id", str(uuid4())),
             "trace_id": self.trace_id,
             "span_id": fields.pop("span_id", None) or (current.span_id if event_type == "exception" and current else str(uuid4())),
             "parent_span_id": fields.pop("parent_span_id", None) if "parent_span_id" in fields else (current.span_id if current and event_type not in {"run_started", "run_completed"} else None),
@@ -222,18 +294,25 @@ class Trace:
             "input": fields.pop("input", None),
             "output": fields.pop("output", None),
             "tool_name": fields.pop("tool_name", None),
+            "model_name": fields.pop("model_name", None),
             "tool_args": fields.pop("tool_args", None),
             "tool_result": fields.pop("tool_result", None),
             "handoff_to": fields.pop("handoff_to", None),
+            "integration": fields.pop("integration", "manual"),
+            "framework": fields.pop("framework", None),
+            "framework_run_id": fields.pop("framework_run_id", None),
+            "framework_parent_id": fields.pop("framework_parent_id", None),
+            "relationship": fields.pop("relationship", "observed"),
+            "relationship_confidence": fields.pop("relationship_confidence", "observed"),
             "error_type": fields.pop("error_type", None),
             "error_details": fields.pop("error_details", None),
-            "metadata": fields.pop("metadata", None) or {},
+            "metadata": {**(fields.pop("metadata", None) or {}), **fields},
         }
-        self.scope._queue(event)
+        self.scope.emit(event)
 
 
 class Span:
-    def __init__(self, trace: Trace, name: str, *, kind: str, event_type: str | None = None, input: Any = None, tool_name: str | None = None, tool_args: Any = None, metadata: dict[str, Any] | None = None) -> None:
+    def __init__(self, trace: Trace, name: str, *, kind: str, event_type: str | None = None, input: Any = None, tool_name: str | None = None, tool_args: Any = None, model_name: str | None = None, metadata: dict[str, Any] | None = None) -> None:
         self.trace = trace
         self.scope = trace.scope
         self.name = name
@@ -243,6 +322,7 @@ class Span:
         self.output: Any = None
         self.tool_name = tool_name
         self.tool_args = tool_args
+        self.model_name = model_name
         self.tool_result: Any = None
         self.metadata = metadata or {}
         self.span_id = str(uuid4())
@@ -257,6 +337,9 @@ class Span:
         self._token = _current_span.set(self)
         return self
 
+    async def __aenter__(self) -> "Span":
+        return self.__enter__()
+
     def set_output(self, value: Any) -> None:
         if self.kind == "tool":
             self.tool_result = value
@@ -265,7 +348,7 @@ class Span:
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         ended_at = _utc_now()
-        status = "failed" if exc else "succeeded"
+        status = "cancelled" if exc_type and exc_type.__name__ == "CancelledError" else ("failed" if exc else "succeeded")
         duration_ms = int((ended_at - (self.started_at or ended_at)).total_seconds() * 1000)
         self.trace.record(
             self.event_type,
@@ -277,6 +360,7 @@ class Span:
             input=self.input,
             output=self.output,
             tool_name=self.tool_name,
+            model_name=self.model_name,
             tool_args=self.tool_args,
             tool_result=self.tool_result,
             metadata=self.metadata,
@@ -289,3 +373,9 @@ class Span:
         if self._token is not None:
             _current_span.reset(self._token)
         return False
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return self.__exit__(exc_type, exc, tb)
+
+
+SpanTrace = AgentScope

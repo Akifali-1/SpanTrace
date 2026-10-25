@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import get_settings
 from .db import Base, engine, get_db
+from .graph import build_execution_graph
 from .incident import evaluate_incidents
+from .integrations import diagnostics_for_project
 from .models import ApiKey, Project, RegressionCase, RegressionRun, Run, TraceEvent
 from .regression import run_booking_regression
 from .schemas import EventBatch, KeyCreate, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, event_dict
@@ -27,7 +29,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="AgentScope API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="SpanTrace API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -76,7 +78,8 @@ def sync_run_from_event(db: Session, project: Project, event: Any) -> Run:
     if event.occurred_at < run.started_at:
         run.started_at = event.occurred_at
     if event.event_type == "run_completed":
-        run.status = event.status if event.status != "running" else "succeeded"
+        if run.status != "failed":
+            run.status = event.status if event.status != "running" else "succeeded"
         run.ended_at = event.ended_at or event.occurred_at
     elif event.status == "failed":
         run.status = "failed"
@@ -89,7 +92,7 @@ def sync_run_from_event(db: Session, project: Project, event: Any) -> Run:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "agentscope-api"}
+    return {"status": "ok", "service": "spantrace-api"}
 
 
 @app.get("/readiness")
@@ -203,8 +206,15 @@ def get_run(trace_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Run not found.")
     incidents = evaluate_incidents(run.events)
     result = serialize_run(run, incidents)
-    result["events"] = [serialize_event(event) for event in sorted(run.events, key=lambda item: item.occurred_at)]
+    ordered_events = sorted(run.events, key=lambda item: item.occurred_at)
+    result["events"] = [serialize_event(event) for event in ordered_events]
+    result["graph"] = build_execution_graph(ordered_events)
     return result
+
+
+@app.get("/v1/integrations")
+def list_integrations(project: ProjectDep, db: Db) -> dict[str, Any]:
+    return {"items": diagnostics_for_project(db, project)}
 
 
 @app.get("/v1/runs/{trace_id}/export")

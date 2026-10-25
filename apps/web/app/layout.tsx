@@ -3,7 +3,7 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AgentScope · Multi-agent observability",
+  title: "SpanTrace · Multi-agent observability",
   description: "Evidence-backed traces for multi-agent systems.",
 };
 
@@ -13,7 +13,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         <div className="app-shell">
           <header className="topbar">
-            <Link href="/" className="brand"><span className="brand-mark">A</span><span>AgentScope</span></Link>
+            <Link href="/" className="brand"><span className="brand-mark">S</span><span>SpanTrace</span></Link>
             <nav className="nav-links" aria-label="Primary navigation">
               <Link href="/">Runs</Link>
               <Link href="/settings">Settings</Link>

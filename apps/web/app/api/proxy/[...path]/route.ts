@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const apiUrl = () => (process.env.AGENTSCOPE_API_URL || "http://localhost:8070").replace(/\/$/, "");
+const apiUrl = () => (process.env.SPANTRACE_API_URL || process.env.AGENTSCOPE_API_URL || "http://localhost:8070").replace(/\/$/, "");
 
 async function forward(request: NextRequest, path: string[]) {
-  const key = process.env.AGENTSCOPE_API_KEY;
-  if (!key) return NextResponse.json({ detail: "Dashboard is not configured. Set AGENTSCOPE_API_KEY in apps/web/.env.local." }, { status: 503 });
+  const key = process.env.SPANTRACE_API_KEY || process.env.AGENTSCOPE_API_KEY;
+  if (!key) return NextResponse.json({ detail: "Dashboard is not configured. Set SPANTRACE_API_KEY in apps/web/.env.local." }, { status: 503 });
   const target = `${apiUrl()}/${path.join("/")}${request.nextUrl.search}`;
   const headers = new Headers({ "X-API-Key": key });
   const contentType = request.headers.get("content-type");

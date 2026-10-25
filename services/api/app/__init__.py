@@ -1,1 +1,1 @@
-"""AgentScope API application."""
+"""SpanTrace API application."""

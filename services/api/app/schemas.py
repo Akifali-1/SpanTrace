@@ -25,9 +25,16 @@ class TraceEventIn(BaseModel):
     input: Any | None = None
     output: Any | None = None
     tool_name: str | None = Field(default=None, max_length=160)
+    model_name: str | None = Field(default=None, max_length=160)
     tool_args: Any | None = None
     tool_result: Any | None = None
     handoff_to: str | None = Field(default=None, max_length=160)
+    integration: str = Field(default="manual", max_length=80)
+    framework: str | None = Field(default=None, max_length=120)
+    framework_run_id: str | None = Field(default=None, max_length=160)
+    framework_parent_id: str | None = Field(default=None, max_length=160)
+    relationship: str = Field(default="observed", max_length=64)
+    relationship_confidence: str = Field(default="observed", max_length=32)
     error_type: str | None = Field(default=None, max_length=160)
     error_details: str | None = Field(default=None, max_length=10_000)
     metadata: dict[str, Any] = Field(default_factory=dict)

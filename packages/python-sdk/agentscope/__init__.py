@@ -1,6 +1,10 @@
-"""Small, failure-tolerant Python SDK for AgentScope trace capture."""
+"""Compatibility package for the SpanTrace Python SDK.
 
-from .client import AgentScope, Span, Trace
+The original Task 1 import path was ``agentscope``. It remains supported while
+new integrations and documentation use the ``spantrace`` package name.
+"""
 
-__all__ = ["AgentScope", "Span", "Trace"]
+from .client import AgentScope, Span, SpanTrace, Trace
+
+__all__ = ["AgentScope", "SpanTrace", "Span", "Trace"]
 __version__ = "0.1.0"

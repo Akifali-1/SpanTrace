@@ -47,6 +47,8 @@ def evaluate_incidents(events: Iterable[Any]) -> list[dict[str, Any]]:
                     "title": "Reservation created before approval",
                     "summary": f"create_reservation ran while approval was {approval_state}.",
                     "violating_event_id": event.event_id,
+                    "responsible_span_id": event.span_id,
+                    "responsible_parent_span_id": event.parent_span_id,
                     "evidence": [
                         {"event_id": approval_event_id, "fact": f"Recorded approval state was {approval_state}."},
                         {"event_id": event.event_id, "fact": "Recorded create_reservation tool result contained a reservation."},
@@ -67,6 +69,8 @@ def evaluate_incidents(events: Iterable[Any]) -> list[dict[str, Any]]:
                     "title": "Approval evidence is missing",
                     "summary": "A reservation was created, but this trace does not record an approval state.",
                     "violating_event_id": event.event_id,
+                    "responsible_span_id": event.span_id,
+                    "responsible_parent_span_id": event.parent_span_id,
                     "evidence": [{"event_id": event.event_id, "fact": "Recorded create_reservation tool result contained a reservation."}],
                     "observed_facts": ["reservation_created=True", "approval_state=missing"],
                     "inference": "The trace is insufficient to determine whether approval was required or granted.",

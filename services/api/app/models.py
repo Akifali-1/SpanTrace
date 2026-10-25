@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy import JSON
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship as orm_relationship
 
 from .db import Base
 
@@ -21,8 +21,8 @@ class Project(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     name: Mapped[str] = mapped_column(String(160))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
-    keys: Mapped[list["ApiKey"]] = relationship(back_populates="project", cascade="all, delete-orphan")
-    runs: Mapped[list["Run"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    keys: Mapped[list["ApiKey"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
+    runs: Mapped[list["Run"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class ApiKey(Base):
@@ -35,7 +35,7 @@ class ApiKey(Base):
     prefix: Mapped[str] = mapped_column(String(16))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
-    project: Mapped[Project] = relationship(back_populates="keys")
+    project: Mapped[Project] = orm_relationship(back_populates="keys")
 
 
 class Run(Base):
@@ -52,8 +52,8 @@ class Run(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     event_count: Mapped[int] = mapped_column(Integer, default=0)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
-    project: Mapped[Project] = relationship(back_populates="runs")
-    events: Mapped[list["TraceEvent"]] = relationship(back_populates="run", cascade="all, delete-orphan", order_by="TraceEvent.occurred_at")
+    project: Mapped[Project] = orm_relationship(back_populates="runs")
+    events: Mapped[list["TraceEvent"]] = orm_relationship(back_populates="run", cascade="all, delete-orphan", order_by="TraceEvent.occurred_at")
 
 
 class TraceEvent(Base):
@@ -76,14 +76,21 @@ class TraceEvent(Base):
     input_json: Mapped[Any | None] = mapped_column(JSONType, nullable=True)
     output_json: Mapped[Any | None] = mapped_column(JSONType, nullable=True)
     tool_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     tool_args: Mapped[Any | None] = mapped_column(JSONType, nullable=True)
     tool_result: Mapped[Any | None] = mapped_column(JSONType, nullable=True)
     handoff_to: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    integration: Mapped[str] = mapped_column(String(80), default="manual")
+    framework: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    framework_run_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    framework_parent_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    relationship: Mapped[str] = mapped_column(String(64), default="observed")
+    relationship_confidence: Mapped[str] = mapped_column(String(32), default="observed")
     error_type: Mapped[str | None] = mapped_column(String(160), nullable=True)
     error_details: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     schema_version: Mapped[str] = mapped_column(String(16), default="1.0")
-    run: Mapped[Run] = relationship(back_populates="events")
+    run: Mapped[Run] = orm_relationship(back_populates="events")
 
 
 class RegressionCase(Base):

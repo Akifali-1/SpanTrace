@@ -73,3 +73,38 @@ def test_filters_and_health(client, project):
     client.post("/v1/ingest/events", headers=headers, json={"events": [event("f-1", trace_id="failed", status="failed", agent_name="booking")]})
     assert client.get("/v1/runs?status=failed", headers=headers).json()["total"] == 1
     assert client.get("/v1/runs?agent=booking", headers=headers).json()["total"] == 1
+
+
+def test_graph_and_integration_diagnostics_are_truthful(client, project):
+    headers = auth(project)
+    now = datetime.now(timezone.utc)
+    events = [
+        event("otel-start", trace_id="otel-trace", event_type="run_started", kind="workflow", status="running", integration="opentelemetry", framework="deterministic-test", occurred_at=now.isoformat(), span_id="root"),
+        event("otel-agent", trace_id="otel-trace", event_type="agent_span", kind="agent", integration="opentelemetry", framework="deterministic-test", occurred_at=(now + timedelta(milliseconds=1)).isoformat(), span_id="agent", parent_span_id="root", relationship="observed"),
+        event("otel-handoff", trace_id="otel-trace", event_type="handoff", kind="handoff", integration="opentelemetry", framework="deterministic-test", occurred_at=(now + timedelta(milliseconds=2)).isoformat(), span_id="handoff", parent_span_id="agent", handoff_to="booking", relationship_confidence="unknown"),
+    ]
+    assert client.post("/v1/ingest/events", headers=headers, json={"events": events}).status_code == 200
+    detail = client.get("/v1/runs/otel-trace", headers=headers).json()
+    assert detail["graph"]["status"] == "partially_observed"
+    assert detail["graph"]["summary"]["uncertain_relationship_count"] == 1
+    assert detail["graph"]["summary"]["has_completion"] is False
+    integrations = client.get("/v1/integrations", headers=headers).json()["items"]
+    otel = next(item for item in integrations if item["id"] == "opentelemetry")
+    callback = next(item for item in integrations if item["id"] == "callback")
+    assert otel["state"] == "partially_observed"
+    assert otel["events_received"] == 3
+    assert callback["state"] == "no_events_received"
+
+
+def test_failed_child_is_not_hidden_by_successful_workflow_completion(client, project):
+    headers = auth(project)
+    now = datetime.now(timezone.utc)
+    events = [
+        event("root-start", trace_id="failed-child", event_type="run_started", kind="workflow", status="running", span_id="root", occurred_at=now.isoformat()),
+        event("child-failed", trace_id="failed-child", event_type="agent_span", kind="agent", status="failed", span_id="child", parent_span_id="root", occurred_at=(now + timedelta(milliseconds=1)).isoformat()),
+        event("root-complete", trace_id="failed-child", event_type="run_completed", kind="workflow", status="succeeded", span_id="root", occurred_at=(now + timedelta(milliseconds=2)).isoformat()),
+    ]
+    assert client.post("/v1/ingest/events", headers=headers, json={"events": events}).status_code == 200
+    run = client.get("/v1/runs/failed-child", headers=headers).json()
+    assert run["status"] == "failed"
+    assert run["graph"]["edges"][0]["from"] == "root-start"
