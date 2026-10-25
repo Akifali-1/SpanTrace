@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agentscope
+      POSTGRES_USER: agentscope
+      POSTGRES_PASSWORD: agentscope
+    ports:
+      - "5432:5432"
+    volumes:
+      - agentscope-postgres:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment:
+      AGENTSCOPE_DATABASE_URL: postgresql+psycopg://agentscope:agentscope@postgres:5432/agentscope
+      AGENTSCOPE_CORS_ORIGINS: http://localhost:3070
+    ports:
+      - "8070:8000"
+    depends_on:
+      - postgres
+
+volumes:
+  agentscope-postgres:
