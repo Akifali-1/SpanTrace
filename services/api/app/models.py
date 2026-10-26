@@ -23,6 +23,7 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
     keys: Mapped[list["ApiKey"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     runs: Mapped[list["Run"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
+    repository_analyses: Mapped[list["RepositoryAnalysis"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class ApiKey(Base):
@@ -113,3 +114,93 @@ class RegressionRun(Base):
     passed: Mapped[bool] = mapped_column(default=False)
     actual: Mapped[dict[str, Any]] = mapped_column(JSONType)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+
+
+class RepositoryAnalysis(Base):
+    __tablename__ = "repository_analyses"
+    __table_args__ = (Index("ix_repository_analyses_project_created", "project_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    source_kind: Mapped[str] = mapped_column(String(32))
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_revision: Mapped[str] = mapped_column(String(200))
+    archive_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="waiting_for_source")
+    analysis_version: Mapped[int] = mapped_column(Integer, default=1)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    limitations_json: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    analyzed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    project: Mapped[Project] = orm_relationship(back_populates="repository_analyses")
+    findings: Mapped[list["RepositoryFinding"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
+    relationships: Mapped[list["RepositoryRelationship"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
+    configurations: Mapped[list["InstrumentationConfig"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
+
+
+class RepositoryFinding(Base):
+    __tablename__ = "repository_findings"
+    __table_args__ = (UniqueConstraint("analysis_id", "stable_id", name="uq_repository_finding_stable"), Index("ix_repository_findings_analysis_kind", "analysis_id", "kind"))
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    analysis_id: Mapped[str] = mapped_column(ForeignKey("repository_analyses.id", ondelete="CASCADE"), index=True)
+    stable_id: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(48))
+    name: Mapped[str] = mapped_column(String(240))
+    symbol_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    file_path: Mapped[str] = mapped_column(String(500))
+    start_line: Mapped[int] = mapped_column(Integer)
+    end_line: Mapped[int] = mapped_column(Integer)
+    symbol_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    framework: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    detection_method: Mapped[str] = mapped_column(String(160))
+    evidence_summary: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[str] = mapped_column(String(48))
+    instrumentation_status: Mapped[str] = mapped_column(String(48), default="needs_confirmation")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="findings")
+    outgoing_relationships: Mapped[list["RepositoryRelationship"]] = orm_relationship(foreign_keys="RepositoryRelationship.source_finding_id", back_populates="source_finding")
+    incoming_relationships: Mapped[list["RepositoryRelationship"]] = orm_relationship(foreign_keys="RepositoryRelationship.target_finding_id", back_populates="target_finding")
+
+
+class RepositoryRelationship(Base):
+    __tablename__ = "repository_relationships"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    analysis_id: Mapped[str] = mapped_column(ForeignKey("repository_analyses.id", ondelete="CASCADE"), index=True)
+    source_finding_id: Mapped[str] = mapped_column(ForeignKey("repository_findings.id", ondelete="CASCADE"), index=True)
+    target_finding_id: Mapped[str | None] = mapped_column(ForeignKey("repository_findings.id", ondelete="CASCADE"), nullable=True, index=True)
+    target_name: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    relationship_type: Mapped[str] = mapped_column(String(64))
+    confidence: Mapped[str] = mapped_column(String(48))
+    detection_method: Mapped[str] = mapped_column(String(160))
+    evidence_summary: Mapped[str] = mapped_column(Text)
+    file_path: Mapped[str] = mapped_column(String(500))
+    start_line: Mapped[int] = mapped_column(Integer)
+    end_line: Mapped[int] = mapped_column(Integer)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="relationships")
+    source_finding: Mapped[RepositoryFinding] = orm_relationship(foreign_keys=[source_finding_id], back_populates="outgoing_relationships")
+    target_finding: Mapped[RepositoryFinding | None] = orm_relationship(foreign_keys=[target_finding_id], back_populates="incoming_relationships")
+
+
+class InstrumentationConfig(Base):
+    __tablename__ = "instrumentation_configs"
+    __table_args__ = (UniqueConstraint("analysis_id", "version", name="uq_instrumentation_config_version"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    analysis_id: Mapped[str] = mapped_column(ForeignKey("repository_analyses.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSONType)
+    valid: Mapped[bool] = mapped_column(default=True)
+    stale: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="configurations")

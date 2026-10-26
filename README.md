@@ -1,6 +1,6 @@
 # SpanTrace
 
-SpanTrace is a local-first developer platform for understanding multi-agent executions. The original Task 1 `agentscope` import and environment variables remain compatible while the product and new SDK path use SpanTrace.
+SpanTrace is a local-first developer platform for understanding multi-agent executions and preparing evidence-backed instrumentation. The original Task 1 `agentscope` import and environment variables remain compatible while the product and new SDK path use SpanTrace.
 
 **capture → persist → inspect → detect a policy incident → create a regression case → verify the corrected behavior**
 
@@ -145,6 +145,32 @@ Payload capture is configurable with `SPANTRACE_CAPTURE_PAYLOADS` (the `AGENTSCO
 
 The Settings page reports `no events received`, `events received`, or `partially observed` using persisted telemetry evidence. A partial trace usually means the source did not expose a root/completion event, a parent ID was not available, or a handoff target was not identified. Check the framework's callback configuration, keep the provider alive until the workflow finishes, and call `provider.shutdown()` or `scope.shutdown()` at process exit.
 
+## Repository intelligence
+
+The **Repository map** page adds a read-only, source-understanding workflow:
+
+1. Import a public GitHub repository URL or upload a ZIP archive.
+2. SpanTrace validates the source, extracts it into project-isolated storage, and performs bounded static analysis.
+3. Review the candidate entry points, agents, workflow graphs, tools, model calls, external boundaries, frameworks, relationships, and source evidence.
+4. Select supported Task 2 adapters and components, then validate and export a versioned `spantrace-instrumentation.json` configuration.
+
+The current deep analysis coverage is Python AST and manifest analysis. JavaScript, TypeScript, Go, Rust, Java, Kotlin, Ruby, PHP, and other recognized files are inventoried and reported, but are not claimed to have deep agent discovery. Current framework markers include OpenTelemetry, SpanTrace, LangGraph, LangChain, CrewAI, AutoGen, OpenAI, Anthropic, and Google GenAI; framework-specific instrumentation status is conservative and only the OpenTelemetry and generic callback adapters are offered for configuration because those are the adapters implemented and tested by the SDK.
+
+Confidence is intentionally categorical:
+
+- **Confirmed from syntax/configuration** — directly established by an import, decorator, AST call, graph registration, or `__main__` guard.
+- **Strong candidate** — supported by multiple naming, base-class, or call signals.
+- **Possible** — plausible but not enough evidence to establish the component.
+- **Unknown** — a relationship or target could not be resolved from source.
+
+Every persisted finding and relationship includes a stable finding ID, relative file path, line range, detection method, evidence explanation, confidence, and instrumentation readiness. The dashboard can fetch a short redacted source window for the selected finding. Source-derived relationships and runtime trace graphs remain separate.
+
+GitHub import is public-only in this task. It validates HTTPS GitHub hosts, rejects unexpected redirects, records the selected ref and resolved commit when available, and does not request or store credentials. Private repositories can use a ZIP upload until an explicitly authorized least-privilege integration is added. ZIP imports enforce archive, extracted-size, file-count, individual-file, nesting, path traversal, duplicate-path, and symlink checks. Generated dependencies, caches, build output, virtual environments, and vendored directories are excluded. Imported source is never imported as Python, executed, installed, tested, or passed wholesale to an LLM.
+
+Relevant local settings are `SPANTRACE_REPOSITORY_STORAGE_PATH`, `SPANTRACE_REPOSITORY_MAX_ARCHIVE_BYTES`, `SPANTRACE_REPOSITORY_MAX_EXTRACTED_BYTES`, `SPANTRACE_REPOSITORY_MAX_FILES`, `SPANTRACE_REPOSITORY_MAX_FILE_BYTES`, `SPANTRACE_REPOSITORY_MAX_DEPTH`, `SPANTRACE_REPOSITORY_ANALYSIS_MAX_SOURCE_BYTES`, and `SPANTRACE_REPOSITORY_HTTP_TIMEOUT_SECONDS`. The default storage directory `.spantrace-data/` is ignored by Git.
+
+Repository analysis is a Task 3 capability. Controlled execution, dependency installation, arbitrary runners, dashboard-triggered application execution, automatic source edits, and autonomous debugging loops remain intentionally deferred to Task 4.
+
 ## Tests and checks
 
 Run the backend, SDK, and demo tests:
@@ -160,6 +186,10 @@ cd apps/web
 npm run typecheck
 npm run build
 ```
+
+The web build records a fingerprint of the app source, configuration, and lockfile next to the verified `.next` output. Repeating `npm run build` without relevant changes reuses that production artifact instead of running the full Next.js compilation again. Set `SPANTRACE_FORCE_BUILD=1` when a full rebuild is required.
+
+When the repository is opened from a Windows-mounted WSL path such as `/mnt/c`, the frontend build script mirrors the small web source tree into a Linux filesystem cache at `~/.cache/spantrace/web-build` and builds there. This avoids repeatedly traversing `node_modules` and `.next` over the mounted Windows filesystem. The first cached build installs dependencies once; later `npm run build` calls reuse the cache and refresh only source files. Set `SPANTRACE_WEB_BUILD_CACHE` to choose another Linux-side cache location. `npm run start` uses the same cache, while `npm run dev` continues to use the working tree directly. Native Linux paths, Windows Node, and container builds continue to use the normal Next.js build path.
 
 The current test suite covers nested SDK spans, async context relationships, callback and OpenTelemetry lifecycle capture, redaction, fail-open/fail-closed network behavior, ingestion idempotency, invalid payloads, project isolation, filters, graph reconstruction, integration diagnostics, incident evidence, regression pass/fail behavior, and demo execution.
 

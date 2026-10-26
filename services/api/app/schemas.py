@@ -65,6 +65,35 @@ class RegressionRunRequest(BaseModel):
     fixed: bool = False
 
 
+class RepositoryUrlImport(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+    ref: str | None = Field(default=None, max_length=200)
+
+
+class InstrumentationConfigSelection(BaseModel):
+    schema_version: str = Field(default="1.0", min_length=1, max_length=16)
+    workflow_entry_point_ids: list[str] = Field(default_factory=list, max_length=50)
+    component_ids: list[str] = Field(default_factory=list, max_length=500)
+    adapter_ids: list[str] = Field(default_factory=list, max_length=20)
+    capture_payloads: bool = False
+    redact_secrets: bool = True
+    excluded_paths: list[str] = Field(default_factory=list, max_length=200)
+    notes: str = Field(default="", max_length=2000)
+
+
+class InstrumentationConfigDocument(BaseModel):
+    schema_version: str = Field(min_length=1, max_length=16)
+    project: dict[str, str]
+    source: dict[str, Any]
+    workflow_entry_points: list[dict[str, Any]]
+    components: list[dict[str, Any]]
+    adapters: list[dict[str, Any]]
+    instrumentation: dict[str, bool]
+    exclusions: dict[str, list[str]]
+    limitations: list[str]
+    notes: str
+
+
 def event_dict(event: TraceEventIn) -> dict[str, Any]:
     data = event.model_dump()
     data["input_json"] = data.pop("input")

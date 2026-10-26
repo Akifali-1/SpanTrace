@@ -10,9 +10,13 @@ async function forward(request: NextRequest, path: string[]) {
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);
   const body = request.method === "GET" || request.method === "DELETE" ? undefined : await request.arrayBuffer();
-  const response = await fetch(target, { method: request.method, headers, body, cache: "no-store" });
-  const text = await response.text();
-  return new NextResponse(text, { status: response.status, headers: { "content-type": response.headers.get("content-type") || "application/json" } });
+  try {
+    const response = await fetch(target, { method: request.method, headers, body, cache: "no-store" });
+    const text = await response.text();
+    return new NextResponse(text, { status: response.status, headers: { "content-type": response.headers.get("content-type") || "application/json" } });
+  } catch {
+    return NextResponse.json({ detail: "SpanTrace API is unavailable. Start the API or check SPANTRACE_API_URL." }, { status: 502 });
+  }
 }
 
 export async function GET(request: NextRequest, context: { params: Promise<{ path: string[] }> }) { return forward(request, (await context.params).path); }

@@ -1,4 +1,4 @@
-# SpanTrace Task 2 architecture
+# SpanTrace Task 3 architecture
 
 ## Components
 
@@ -6,6 +6,8 @@
 - `packages/python-sdk/agentscope/integrations`: opt-in adapter layer. `OpenTelemetryAdapter` exports completed public OpenTelemetry spans; `CallbackAdapter` normalizes framework callback/listener events without monkey-patching arbitrary functions.
 - `services/api/app`: FastAPI modular monolith. Pydantic validates incoming event batches, SQLAlchemy persists project-scoped data, and API-key authentication resolves a project from a stored hash.
 - `apps/web`: Next.js App Router dashboard. Browser requests go through a server-side route handler that adds `X-API-Key`, keeping the project secret out of frontend JavaScript. Run detail includes a conservative execution graph and a chronological fallback; settings includes integration diagnostics.
+- `services/api/app/repository.py`: project-scoped repository ingestion and configuration service. It accepts public GitHub archives and ZIP uploads, validates archive boundaries, stores source under an isolated project/analysis directory, persists analysis versions, and validates exportable instrumentation configuration.
+- `services/api/app/discovery.py`: deterministic read-only inventory and Python AST discovery engine. It detects manifests, languages, framework markers, candidate agents/tools/graphs/model calls/entry points, source-supported relationships, environment-variable names, and analysis limitations without importing or executing repository code.
 - `examples/travel_booking`: deterministic multi-agent scenario with planner, hotel search, budget validation, approval policy, booking, final response, and a mock booking service.
 
 ## Trace contract
@@ -38,6 +40,16 @@ The API builds a graph only from observed parent span IDs and explicit handoff m
 
 Creating a case from an incident stores the source trace ID, travel scenario, and expected invariant. The runner has one explicit built-in scenario and two modes: defective (reservation created while pending) and corrected (booking waits). No user code is uploaded, deserialized, or executed by the API.
 
+## Repository import and discovery
+
+`POST /v1/repositories/import/url` accepts a public HTTPS GitHub repository URL and optional ref. The API calls GitHub's public metadata and codeload endpoints with redirects disabled, records the branch/ref, commit SHA when resolvable, and a SHA-256 archive fingerprint, then analyzes the extracted source. `POST /v1/repositories/import/zip` accepts a bounded multipart ZIP upload. Both flows return actual persisted states (`importing`, `source_available`, `analyzing`, `analysis_complete`, `partially_analyzed`, or `failed`); the current synchronous path completes the state transition before responding.
+
+`repository_analyses` stores source identity, revision, storage path, summary, limitations, and timestamps. `repository_findings` stores source-backed components with stable IDs and evidence locations. `repository_relationships` stores only resolved or explicitly unresolved calls, registrations, delegations, invocations, routes, and external-service uses. `instrumentation_configs` stores validated, versioned configurations tied to one analysis revision. Reimporting the same archive fingerprint reuses a completed analysis instead of duplicating findings; a changed source fingerprint creates a new analysis and marks older configurations stale.
+
+The analyzer walks bounded text files while excluding generated and vendored directories. Python files are parsed with `ast.parse`; syntax errors produce a partial analysis rather than guessed symbols. It detects imports, decorators, agent-like bases, graph construction, tool declarations/registrations, model APIs, HTTP client boundaries, direct local calls, graph edges, delegation calls, conventional entry points, and `__main__` guards. Non-Python languages currently receive inventory-level coverage only. No repository module is imported and no source-derived instruction is treated as an analysis command.
+
+The dashboard's Repository map keeps static architecture separate from runtime traces. Nodes are filterable by type and confidence, edges show their detection evidence, and the selected node exposes a redacted source window. Configuration review supports workflow-entry selection, components, the tested OpenTelemetry adapter, the generic callback adapter, payload capture, and common-secret redaction. Export is JSON schema-shaped and tied to the analyzed source revision. Task 4 remains responsible for controlled execution and provisioning.
+
 ## Security boundaries and limitations
 
 - Raw project keys are returned once on project/key creation; only hashes and prefixes are persisted.
@@ -50,3 +62,4 @@ Creating a case from an incident stores the source trace ID, travel scenario, an
 - The local API uses `create_all` for first-run convenience; production deployments should apply Alembic migrations and configure PostgreSQL.
 - Retention is represented in configuration but automatic cleanup is deferred.
 - The dashboard currently represents one project through the server-side API-key configuration; multi-project login and organization management are outside this slice.
+- Repository source is stored under `.spantrace-data/<project>/<analysis>` by default and is protected by the existing project API-key boundary. Automatic retention cleanup, private GitHub OAuth/app installation, webhook synchronization, and deep non-Python discovery are not implemented.

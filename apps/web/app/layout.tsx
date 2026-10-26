@@ -16,6 +16,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             <Link href="/" className="brand"><span className="brand-mark">S</span><span>SpanTrace</span></Link>
             <nav className="nav-links" aria-label="Primary navigation">
               <Link href="/">Runs</Link>
+              <Link href="/repositories">Repository map</Link>
               <Link href="/settings">Settings</Link>
             </nav>
             <div className="topbar-status"><span className="status-dot" />Local workspace</div>

@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+import hashlib
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -14,9 +15,20 @@ from .db import Base, engine, get_db
 from .graph import build_execution_graph
 from .incident import evaluate_incidents
 from .integrations import diagnostics_for_project
-from .models import ApiKey, Project, RegressionCase, RegressionRun, Run, TraceEvent
+from .models import ApiKey, InstrumentationConfig, Project, RegressionCase, RegressionRun, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship, Run, TraceEvent
+from .repository import (
+    RepositoryImportError,
+    fetch_public_github_archive,
+    load_analysis,
+    process_archive,
+    read_source_evidence,
+    read_upload,
+    save_configuration,
+    serialize_analysis,
+    serialize_config,
+)
 from .regression import run_booking_regression
-from .schemas import EventBatch, KeyCreate, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, event_dict
+from .schemas import EventBatch, InstrumentationConfigSelection, KeyCreate, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, RepositoryUrlImport, event_dict
 from .security import issue_key, project_for_key, revoke_key
 from .serialization import iso, serialize_event, serialize_run
 
@@ -42,8 +54,15 @@ app.add_middleware(
 @app.middleware("http")
 async def request_size_guard(request: Request, call_next):
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > settings.max_event_bytes * 2:
-        return JSONResponse(status_code=413, content={"detail": "Request payload is too large."})
+    if content_length:
+        try:
+            size = int(content_length)
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Invalid content length."})
+        if request.url.path == "/v1/ingest/events" and size > settings.max_event_bytes * 2:
+            return JSONResponse(status_code=413, content={"detail": "Request payload is too large."})
+        if request.url.path.startswith("/v1/repositories/import") and size > settings.repository_max_archive_bytes + 1_048_576:
+            return JSONResponse(status_code=413, content={"detail": "Repository archive request is too large."})
     return await call_next(request)
 
 
@@ -220,6 +239,142 @@ def get_run(trace_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
 @app.get("/v1/integrations")
 def list_integrations(project: ProjectDep, db: Db) -> dict[str, Any]:
     return {"items": diagnostics_for_project(db, project)}
+
+
+def _repository_error(exc: RepositoryImportError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@app.post("/v1/repositories/import/url", status_code=201)
+def import_repository_url(payload: RepositoryUrlImport, project: ProjectDep, db: Db) -> dict[str, Any]:
+    try:
+        archive, metadata = fetch_public_github_archive(payload.url, payload.ref, settings)
+        analysis, reused = process_archive(
+            db,
+            project,
+            archive,
+            source_kind="github",
+            name=metadata["name"],
+            source_url=metadata["source_url"],
+            branch=metadata["branch"],
+            commit_sha=metadata["commit_sha"],
+            source_revision=metadata["source_revision"],
+            settings=settings,
+        )
+    except RepositoryImportError as exc:
+        raise _repository_error(exc) from exc
+    return {"analysis": serialize_analysis(load_analysis(db, project.id, analysis.id) or analysis, include_findings=True), "reused": reused}
+
+
+@app.post("/v1/repositories/import/zip", status_code=201)
+async def import_repository_zip(project: ProjectDep, db: Db, file: UploadFile = File(...)) -> dict[str, Any]:
+    try:
+        archive, name = await read_upload(file, settings)
+        analysis, reused = process_archive(
+            db,
+            project,
+            archive,
+            source_kind="zip",
+            name=name,
+            source_url=None,
+            branch=None,
+            commit_sha=None,
+            source_revision=f"archive:{hashlib.sha256(archive).hexdigest()[:16]}",
+            settings=settings,
+        )
+    except RepositoryImportError as exc:
+        raise _repository_error(exc) from exc
+    return {"analysis": serialize_analysis(load_analysis(db, project.id, analysis.id) or analysis, include_findings=True), "reused": reused}
+
+
+@app.get("/v1/repositories")
+def list_repository_analyses(project: ProjectDep, db: Db, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+    analyses = db.scalars(select(RepositoryAnalysis).where(RepositoryAnalysis.project_id == project.id).order_by(RepositoryAnalysis.created_at.desc()).limit(limit)).all()
+    return {"items": [serialize_analysis(analysis) for analysis in analyses]}
+
+
+@app.get("/v1/repositories/{analysis_id}")
+def get_repository_analysis(analysis_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    analysis = load_analysis(db, project.id, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found.")
+    return serialize_analysis(analysis, include_findings=True)
+
+
+@app.post("/v1/repositories/{analysis_id}/reanalyze")
+def reanalyze_repository(analysis_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    analysis = load_analysis(db, project.id, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found.")
+    if not analysis.source_path:
+        raise HTTPException(status_code=409, detail="Source is no longer available for this analysis.")
+    from .discovery import analyze_repository
+    from .repository import _persist_result
+
+    analysis.status = "analyzing"
+    analysis.error_message = None
+    db.commit()
+    db.execute(delete(RepositoryRelationship).where(RepositoryRelationship.analysis_id == analysis.id))
+    db.execute(delete(RepositoryFinding).where(RepositoryFinding.analysis_id == analysis.id))
+    result = analyze_repository(analysis.source_path, settings)
+    _persist_result(db, analysis, result)
+    analysis.analysis_version += 1
+    analysis.summary_json = result.summary
+    analysis.limitations_json = result.limitations
+    analysis.status = "partially_analyzed" if result.partially_analyzed else "analysis_complete"
+    analysis.analyzed_at = datetime.utcnow()
+    analysis.updated_at = datetime.utcnow()
+    for configuration in analysis.configurations:
+        configuration.stale = True
+        configuration.updated_at = datetime.utcnow()
+    db.commit()
+    return {"analysis": serialize_analysis(load_analysis(db, project.id, analysis.id) or analysis, include_findings=True), "reused": False}
+
+
+@app.get("/v1/repositories/{analysis_id}/source")
+def get_repository_source_evidence(
+    analysis_id: str,
+    project: ProjectDep,
+    db: Db,
+    path: str = Query(min_length=1, max_length=500),
+    start_line: int = Query(default=1, ge=1, le=1_000_000),
+    end_line: int = Query(default=1, ge=1, le=1_000_000),
+) -> dict[str, Any]:
+    analysis = db.scalar(select(RepositoryAnalysis).where(RepositoryAnalysis.id == analysis_id, RepositoryAnalysis.project_id == project.id))
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found.")
+    if end_line < start_line:
+        raise HTTPException(status_code=422, detail="end_line must be greater than or equal to start_line.")
+    return read_source_evidence(analysis, path, start_line, min(end_line, start_line + 79))
+
+
+@app.get("/v1/repositories/{analysis_id}/config")
+def get_repository_config(analysis_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    analysis = load_analysis(db, project.id, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found.")
+    config = max(analysis.configurations, key=lambda item: item.version, default=None)
+    return {"configuration": serialize_config(config)}
+
+
+@app.post("/v1/repositories/{analysis_id}/config", status_code=201)
+def create_repository_config(analysis_id: str, payload: InstrumentationConfigSelection, project: ProjectDep, db: Db) -> dict[str, Any]:
+    analysis = load_analysis(db, project.id, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found.")
+    config = save_configuration(db, project, analysis, payload)
+    return {"configuration": serialize_config(config)}
+
+
+@app.get("/v1/repositories/{analysis_id}/config/export")
+def export_repository_config(analysis_id: str, project: ProjectDep, db: Db) -> JSONResponse:
+    analysis = load_analysis(db, project.id, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found.")
+    config = max(analysis.configurations, key=lambda item: item.version, default=None)
+    if not config:
+        raise HTTPException(status_code=404, detail="No instrumentation configuration has been saved.")
+    return JSONResponse(content=config.config_json, headers={"Content-Disposition": f'attachment; filename="spantrace-instrumentation-v{config.version}.json"'})
 
 
 @app.get("/v1/runs/{trace_id}/export")
