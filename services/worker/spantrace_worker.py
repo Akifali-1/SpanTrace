@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import importlib.util
 import inspect
 import json
@@ -66,21 +67,35 @@ def main() -> int:
     # short-lived run-scoped capability, not a project API key.
     from spantrace import SpanTrace
 
-    scope = SpanTrace.from_env(capture_payloads=False, strict=False)
+    scope = SpanTrace.from_env()
     adapter = os.environ.get("SPANTRACE_EXECUTION_ADAPTER", "manual")
     provider = None
+    otel_parent = nullcontext()
     if adapter == "opentelemetry":
         provider, _ = scope.instrument_opentelemetry(service_name="spantrace-controlled-workflow", framework="spantrace-execution")
         from opentelemetry import trace as otel_trace
+        from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState, use_span
 
         otel_trace.set_tracer_provider(provider)
+        trace_id = os.environ.get("SPANTRACE_TRACE_ID", "")
+        if len(trace_id) != 32 or not all(character in "0123456789abcdef" for character in trace_id.lower()):
+            raise ValueError("Execution trace ID must be a 32-character hexadecimal value")
+        parent_context = SpanContext(
+            trace_id=int(trace_id, 16),
+            span_id=int(os.urandom(8).hex(), 16),
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            trace_state=TraceState(),
+        )
+        otel_parent = use_span(NonRecordingSpan(parent_context), end_on_exit=False)
 
     try:
         function = _load_callable(root, args.entry_file, args.entry_symbol)
-        with scope.trace(args.entry_symbol, metadata={"execution": True, "source_file": args.entry_file}) as trace:
-            with trace.span(args.entry_symbol, kind="agent", input=inputs) as span:
-                result = _invoke(function, inputs)
-                span.set_output(result)
+        with otel_parent:
+            with scope.trace(args.entry_symbol, metadata={"execution": True, "source_file": args.entry_file}) as trace:
+                with trace.span(args.entry_symbol, kind="agent", input=inputs) as span:
+                    result = _invoke(function, inputs)
+                    span.set_output(result)
     finally:
         if provider is not None:
             provider.shutdown()

@@ -90,6 +90,36 @@ def test_execution_token_endpoint_does_not_accept_project_key(client, project, m
     assert rejected.status_code == 401
 
 
+def test_execution_token_is_scoped_to_its_execution_and_inputs_are_bounded(client, project, monkeypatch):
+    analysis, entry, configuration = setup_analysis(client, project)
+    captured: dict[str, str] = {}
+
+    def capture_submit(execution_id, token, inputs):
+        captured[execution_id] = token
+
+    monkeypatch.setattr(execution_coordinator, "submit", capture_submit)
+    common = {"workflow_entry_point_id": entry["finding_id"], "configuration_id": configuration["id"], "inputs": {"secret": "do-not-return"}}
+    first = client.post(f"/v1/repositories/{analysis['id']}/executions", headers=auth(project), json={**common, "idempotency_key": "token-one"})
+    second = client.post(f"/v1/repositories/{analysis['id']}/executions", headers=auth(project), json={**common, "idempotency_key": "token-two"})
+    assert first.status_code == 202 and second.status_code == 202
+    first_id = first.json()["execution"]["id"]
+    second_id = second.json()["execution"]["id"]
+    assert first.json()["execution"]["input"]["secret"] == "[REDACTED]"
+    cross_run = client.post(
+        f"/v1/executions/{second_id}/events",
+        headers={"X-Execution-Token": captured[first_id]},
+        json={"events": [{"event_id": "cross-run", "trace_id": second.json()["execution"]["trace_id"], "event_type": "run_started", "occurred_at": "2026-01-01T00:00:00Z"}]},
+    )
+    assert cross_run.status_code == 401
+
+    oversized = client.post(
+        f"/v1/repositories/{analysis['id']}/executions",
+        headers=auth(project),
+        json={"workflow_entry_point_id": entry["finding_id"], "configuration_id": configuration["id"], "inputs": {"value": "x" * 70_000}, "idempotency_key": "oversized-input"},
+    )
+    assert oversized.status_code == 413
+
+
 def test_missing_docker_is_reported_as_infrastructure_error(client, project, monkeypatch):
     analysis, entry, configuration = setup_analysis(client, project)
     monkeypatch.setattr("app.execution.shutil.which", lambda _name: None)

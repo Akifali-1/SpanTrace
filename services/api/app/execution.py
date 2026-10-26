@@ -130,6 +130,8 @@ class ExecutionCoordinator:
         try:
             stale = db.query(ExecutionRun).filter(ExecutionRun.status.in_(ACTIVE_STATUSES)).all()
             for execution in stale:
+                if execution.worker_container_id:
+                    self._kill_container(execution.worker_container_id)
                 execution.status = "infrastructure_error"
                 execution.failure_category = "api_restart"
                 execution.completed_at = datetime.utcnow()
@@ -231,6 +233,7 @@ class ExecutionCoordinator:
                 raise ValueError("Execution source entry point is no longer available")
             adapters = [str(item.get("id")) for item in (configuration.config_json or {}).get("adapters", []) if isinstance(item, dict)]
             adapter = "opentelemetry" if "opentelemetry" in adapters else "callback" if "callback" in adapters else "manual"
+            capture_payloads = bool((configuration.config_json or {}).get("instrumentation", {}).get("capture_payloads", False))
             container = f"spantrace-exec-{execution.id[:12]}"
             with self._lock:
                 token = self._tokens.get(execution.id)
@@ -254,10 +257,10 @@ class ExecutionCoordinator:
                 "--env", f"SPANTRACE_PROJECT_ID={execution.project_id}",
                 "--env", f"SPANTRACE_EXECUTION_INPUT={input_json}",
                 "--env", f"SPANTRACE_EXECUTION_ADAPTER={adapter}",
+                "--env", f"SPANTRACE_CAPTURE_PAYLOADS={str(capture_payloads).lower()}",
                 "--env", "PYTHONDONTWRITEBYTECODE=1",
                 "--env", "PYTHONUNBUFFERED=1",
                 self.settings.execution_worker_image,
-                "python", "-m", "spantrace_worker",
                 "--source-root", "/workspace/source",
                 "--entry-file", execution.entry_file_path,
                 "--entry-symbol", execution.entry_symbol,
@@ -266,6 +269,15 @@ class ExecutionCoordinator:
             with self._lock:
                 self._processes[execution_id] = (process, container)
             execution.worker_container_id = container
+            db.commit()
+            db.refresh(execution)
+            if execution.status == "cancel_requested" or execution.cancel_requested_at is not None:
+                self._kill_container(container)
+                self._stop_process(process)
+                with self._lock:
+                    self._processes.pop(execution_id, None)
+                self._set_status(execution_id, "cancelled", failure_category="cancelled", exit_code=process.returncode)
+                return
             transition_status(execution, "running")
             execution.started_at = execution.started_at or datetime.utcnow()
             db.commit()
@@ -278,7 +290,7 @@ class ExecutionCoordinator:
             timed_out = process.poll() is None
             if timed_out:
                 self._kill_container(container)
-                process.wait(timeout=15)
+                self._stop_process(process)
             reader.join(timeout=5)
             code = process.returncode
             logs = "".join(output)
@@ -343,3 +355,14 @@ class ExecutionCoordinator:
     def _kill_container(container: str) -> None:
         subprocess.run(["docker", "kill", container], capture_output=True, text=True, timeout=15, check=False)
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, text=True, timeout=15, check=False)
+
+    @staticmethod
+    def _stop_process(process: subprocess.Popen[str]) -> None:
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass

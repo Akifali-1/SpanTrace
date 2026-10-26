@@ -351,7 +351,7 @@ def create_execution(analysis_id: str, payload: ExecutionCreate, project: Projec
         entry_finding_id=finding.stable_id,
         entry_file_path=finding.file_path,
         entry_symbol=finding.symbol_name,
-        trace_id=f"execution-{uuid4().hex}",
+        trace_id=uuid4().hex,
         idempotency_key=idempotency_key,
         status="queued",
         input_json=redact_value(payload.inputs),
