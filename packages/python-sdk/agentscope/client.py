@@ -66,8 +66,10 @@ class AgentScope:
         capture_inputs: bool | None = None,
         capture_outputs: bool | None = None,
         max_payload_bytes: int = 65_536,
+        execution_id: str | None = None,
+        execution_token: str | None = None,
     ) -> None:
-        self.api_key = api_key
+        self.api_key = api_key or execution_token
         self.endpoint = endpoint.rstrip("/")
         self.project_id = project_id
         self.capture_payloads = capture_payloads
@@ -78,11 +80,13 @@ class AgentScope:
         self.capture_inputs = capture_payloads if capture_inputs is None else capture_inputs
         self.capture_outputs = capture_payloads if capture_outputs is None else capture_outputs
         self.max_payload_bytes = max(1_024, max_payload_bytes)
+        self.execution_id = execution_id
+        self.execution_token = execution_token
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.RLock()
         self._seen_event_ids: set[str] = set()
         self.last_error: Exception | None = None
-        self.disabled = not bool(api_key)
+        self.disabled = not bool(self.api_key)
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "AgentScope":
@@ -92,18 +96,20 @@ class AgentScope:
         capture = (env("SPANTRACE_CAPTURE_PAYLOADS", "true") or "true").lower() not in {"0", "false", "no"}
         strict = (env("SPANTRACE_STRICT", "false") or "false").lower() in {"1", "true", "yes"}
         return cls(
-            api_key=env("SPANTRACE_API_KEY"),
+            api_key=env("SPANTRACE_API_KEY") or env("SPANTRACE_EXECUTION_TOKEN"),
             endpoint=env("SPANTRACE_API_URL", "http://localhost:8070") or "http://localhost:8070",
             project_id=env("SPANTRACE_PROJECT_ID"),
             capture_payloads=capture,
             strict=strict,
             batch_size=int(env("SPANTRACE_BATCH_SIZE", "20") or "20"),
             timeout=float(env("SPANTRACE_TIMEOUT", "5") or "5"),
+            execution_id=env("SPANTRACE_EXECUTION_ID"),
+            execution_token=env("SPANTRACE_EXECUTION_TOKEN"),
             **overrides,
         )
 
     def trace(self, name: str, *, trace_id: str | None = None, metadata: dict[str, Any] | None = None) -> "Trace":
-        return Trace(self, name, trace_id=trace_id, metadata=metadata)
+        return Trace(self, name, trace_id=trace_id or os.getenv("SPANTRACE_TRACE_ID"), metadata=metadata)
 
     def instrument(self, name: str, *, kind: str = "agent"):
         def decorator(function):
@@ -173,10 +179,12 @@ class AgentScope:
                 return
             batch = list(self._buffer)
         payload = json.dumps({"events": batch}, default=str).encode("utf-8")
+        execution_path = f"/v1/executions/{self.execution_id}/events" if self.execution_id and self.execution_token else "/v1/ingest/events"
+        auth_header = {"X-Execution-Token": self.execution_token} if self.execution_id and self.execution_token else {"X-API-Key": self.api_key or ""}
         request = urllib.request.Request(
-            f"{self.endpoint}/v1/ingest/events",
+            f"{self.endpoint}{execution_path}",
             data=payload,
-            headers={"Content-Type": "application/json", "X-API-Key": self.api_key or ""},
+            headers={"Content-Type": "application/json", **auth_header},
             method="POST",
         )
         try:

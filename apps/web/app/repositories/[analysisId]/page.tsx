@@ -60,6 +60,7 @@ type Analysis = {
   error_message?: string;
 };
 type Evidence = { path: string; lines: { line: number; text: string }[] };
+type Execution = { id: string; analysis_id: string; status: string; trace_id: string; source_revision: string; entry_file_path: string; entry_symbol: string; failure_category?: string; result?: Record<string, unknown>; logs?: string; trace_available?: boolean };
 
 const proxy = (path: string) => `/api/proxy/${path}`;
 const confidenceLabel: Record<string, string> = {
@@ -97,6 +98,9 @@ export default function RepositoryDetail({ params }: { params: Promise<{ analysi
   const [capturePayloads, setCapturePayloads] = useState(false);
   const [redactSecrets, setRedactSecrets] = useState(true);
   const [configMessage, setConfigMessage] = useState("");
+  const [executionInput, setExecutionInput] = useState("{}");
+  const [executionMessage, setExecutionMessage] = useState("");
+  const [executions, setExecutions] = useState<Execution[]>([]);
   const analysisId = decodeURIComponent(use(params).analysisId);
 
   async function load() {
@@ -104,6 +108,11 @@ export default function RepositoryDetail({ params }: { params: Promise<{ analysi
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Repository analysis unavailable");
     setAnalysis(data);
+    const executionResponse = await fetch(proxy("v1/executions"), { cache: "no-store" });
+    if (executionResponse.ok) {
+      const executionData = await executionResponse.json();
+      setExecutions((executionData.items || []).filter((item: Execution) => item.analysis_id === data.id));
+    }
     const entries = data.findings.filter((finding: Finding) => finding.kind === "workflow_entry").map((finding: Finding) => finding.finding_id);
     const components = data.findings.filter((finding: Finding) => !["workflow_entry", "framework", "instrumentation"].includes(finding.kind)).map((finding: Finding) => finding.finding_id);
     setEntryIds(entries);
@@ -185,6 +194,33 @@ export default function RepositoryDetail({ params }: { params: Promise<{ analysi
     URL.revokeObjectURL(link.href);
   }
 
+  async function launchExecution() {
+    if (!analysis) return setExecutionMessage("Repository analysis is still loading.");
+    const configuration = analysis.configuration;
+    if (!configuration) return setExecutionMessage("Save a valid instrumentation configuration before launching.");
+    const entryId = entryIds[0];
+    if (!entryId) return setExecutionMessage("Select at least one workflow entry point.");
+    let inputs: unknown;
+    try { inputs = JSON.parse(executionInput); } catch { return setExecutionMessage("Inputs must be valid JSON."); }
+    if (!inputs || Array.isArray(inputs) || typeof inputs !== "object") return setExecutionMessage("Inputs must be a JSON object.");
+    setBusy("execution");
+    setExecutionMessage("");
+    try {
+      const response = await fetch(proxy(`v1/repositories/${encodeURIComponent(analysisId)}/executions`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflow_entry_point_id: entryId, configuration_id: configuration.id, inputs }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Execution could not be started");
+      window.location.href = `/executions/${encodeURIComponent(data.execution.id)}`;
+    } catch (reason) {
+      setExecutionMessage(reason instanceof Error ? reason.message : "Execution could not be started");
+    } finally {
+      setBusy("");
+    }
+  }
+
   function toggle(setter: (value: string[]) => void, values: string[], value: string) {
     setter(values.includes(value) ? values.filter((item) => item !== value) : [...values, value]);
   }
@@ -220,6 +256,15 @@ export default function RepositoryDetail({ params }: { params: Promise<{ analysi
       {analysis.configuration?.stale && <div className="warning-banner"><strong>Configuration is stale.</strong> A newer source analysis exists for this project. Review and save a configuration against the current revision.</div>}
       <div className="config-grid"><div className="panel config-card"><h3>Workflow entry points</h3>{analysis.findings.filter((finding) => finding.kind === "workflow_entry").map((finding) => <label className="check-row" key={finding.finding_id}><input type="checkbox" checked={entryIds.includes(finding.finding_id)} onChange={() => toggle(setEntryIds, entryIds, finding.finding_id)} /><span><strong>{finding.name}</strong><small>{finding.file_path}:{finding.start_line} · {confidenceLabel[finding.confidence]}</small></span></label>)}{analysis.findings.every((finding) => finding.kind !== "workflow_entry") && <div className="cell">No workflow entry point was proven. Leave empty and confirm one later.</div>}</div><div className="panel config-card"><h3>Components</h3>{analysis.findings.filter((finding) => !["workflow_entry", "framework", "instrumentation"].includes(finding.kind)).map((finding) => <label className="check-row" key={finding.finding_id}><input type="checkbox" checked={componentIds.includes(finding.finding_id)} onChange={() => toggle(setComponentIds, componentIds, finding.finding_id)} /><span><strong>{finding.name}</strong><small>{kindLabel[finding.kind] || finding.kind} · {finding.file_path}:{finding.start_line}</small></span></label>)}</div><div className="panel config-card"><h3>Adapters & policy</h3><label className="check-row"><input type="checkbox" checked={adapterIds.includes("opentelemetry")} onChange={() => toggle(setAdapterIds, adapterIds, "opentelemetry")} /><span><strong>OpenTelemetry spans</strong><small>Supported automatic adapter · tested in Task 2</small></span></label><label className="check-row"><input type="checkbox" checked={adapterIds.includes("callback")} onChange={() => toggle(setAdapterIds, adapterIds, "callback")} /><span><strong>Framework callback adapter</strong><small>Explicit lifecycle hooks · no monkey patching</small></span></label><label className="check-row"><input type="checkbox" checked={capturePayloads} onChange={(event) => setCapturePayloads(event.target.checked)} /><span><strong>Capture selected payloads</strong><small>Review content capture before enabling</small></span></label><label className="check-row"><input type="checkbox" checked={redactSecrets} onChange={(event) => setRedactSecrets(event.target.checked)} /><span><strong>Redact common secrets</strong><small>Recommended and enabled by default</small></span></label></div></div>
     </section>
+    <section className="panel execution-panel">
+      <div className="panel-header"><div><div className="eyebrow">Controlled execution</div><h2>Run the selected workflow</h2><p className="cell">This MVP executes only a discovered Python function inside a restricted Docker worker. The API server never imports the repository.</p></div><span className="badge badge-unknown">Docker worker</span></div>
+      <div className="boundary-grid"><div><strong>Source revision</strong><span className="mono">{analysis.source_revision}</span></div><div><strong>Entry point</strong><span>{analysis.findings.find((finding) => finding.finding_id === entryIds[0])?.file_path || "Select an entry point"}</span></div><div><strong>Configuration</strong><span>{analysis.configuration ? `v${analysis.configuration.version}${analysis.configuration.stale ? " · stale" : " · valid"}` : "Not saved"}</span></div><div><strong>Limits</strong><span>120s · 256MB · 1 CPU · 64 PIDs</span></div></div>
+      <label className="field-label" htmlFor="execution-input">Workflow input JSON</label>
+      <textarea id="execution-input" className="input execution-input" value={executionInput} onChange={(event) => setExecutionInput(event.target.value)} rows={5} spellCheck={false} />
+      <div className="hero-actions"><button className="button button-primary" onClick={launchExecution} disabled={busy !== "" || !analysis.configuration}>{busy === "execution" ? "Starting worker…" : "Launch isolated workflow"}</button><span className="small-note">No dependency installation, shell access, source edits, or unrestricted host mounts are provided.</span></div>
+      {executionMessage && <div className="error-banner"><strong>Execution needs attention</strong><span>{executionMessage}</span></div>}
+    </section>
+    <section className="panel repository-list-panel execution-history"><div className="panel-header"><h2>Execution history</h2><span className="cell">Persisted worker records</span></div>{executions.length === 0 ? <div className="empty">No controlled executions for this source revision.</div> : executions.map((execution) => <Link href={`/executions/${encodeURIComponent(execution.id)}`} className="repository-row" key={execution.id}><div><div className="run-name">{execution.entry_symbol}</div><div className="run-id">{execution.entry_file_path} · {execution.trace_id}</div></div><span className={`badge badge-${execution.status === "succeeded" ? "succeeded" : execution.status === "failed" || execution.status === "infrastructure_error" || execution.status === "timed_out" ? "failed" : "running"}`}>{execution.status.replaceAll("_", " ")}</span><div className="cell">{execution.failure_category || "worker execution"}</div><div className="arrow">›</div></Link>)}</section>
     <section className="panel limitations-panel"><h2>Analysis boundaries</h2><div className="boundary-grid"><div><strong>Revision</strong><span className="mono">{analysis.source_revision}</span></div><div><strong>Languages</strong><span>{Object.entries(analysis.summary.language_counts || {}).map(([language, count]) => `${language} ${count}`).join(" · ") || "none"}</span></div><div><strong>Environment names</strong><span>{(analysis.summary.environment_variable_names || []).join(", ") || "none detected"}</span></div><div><strong>Coverage</strong><span>Python deep AST; other languages inventory only</span></div></div>{analysis.limitations.map((limitation) => <div className="limitation-row" key={limitation}>• {limitation}</div>)}</section>
   </>;
 }

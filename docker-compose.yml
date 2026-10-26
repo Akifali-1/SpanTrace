@@ -22,5 +22,14 @@ services:
     depends_on:
       - postgres
 
+  # The API launches this image per execution with tighter per-run limits.
+  # Build it explicitly; it is not an always-on worker or a Docker socket mount.
+  worker-image:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    image: spantrace-worker:0.1.0
+    profiles: [execution-image]
+
 volumes:
   agentscope-postgres:

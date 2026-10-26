@@ -24,6 +24,7 @@ class Project(Base):
     keys: Mapped[list["ApiKey"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     runs: Mapped[list["Run"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     repository_analyses: Mapped[list["RepositoryAnalysis"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
+    execution_runs: Mapped[list["ExecutionRun"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class ApiKey(Base):
@@ -142,6 +143,7 @@ class RepositoryAnalysis(Base):
     findings: Mapped[list["RepositoryFinding"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
     relationships: Mapped[list["RepositoryRelationship"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
     configurations: Mapped[list["InstrumentationConfig"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
+    execution_runs: Mapped[list["ExecutionRun"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
 
 
 class RepositoryFinding(Base):
@@ -204,3 +206,46 @@ class InstrumentationConfig(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
     analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="configurations")
+    execution_runs: Mapped[list["ExecutionRun"]] = orm_relationship(back_populates="configuration")
+
+
+class ExecutionRun(Base):
+    __tablename__ = "execution_runs"
+    __table_args__ = (
+        UniqueConstraint("project_id", "idempotency_key", name="uq_execution_project_idempotency"),
+        Index("ix_execution_runs_project_created", "project_id", "created_at"),
+        Index("ix_execution_runs_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    analysis_id: Mapped[str] = mapped_column(ForeignKey("repository_analyses.id", ondelete="CASCADE"), index=True)
+    configuration_id: Mapped[str] = mapped_column(ForeignKey("instrumentation_configs.id", ondelete="CASCADE"), index=True)
+    source_revision: Mapped[str] = mapped_column(String(200))
+    archive_fingerprint: Mapped[str] = mapped_column(String(64))
+    entry_finding_id: Mapped[str] = mapped_column(String(64))
+    entry_file_path: Mapped[str] = mapped_column(String(500))
+    entry_symbol: Mapped[str] = mapped_column(String(240))
+    trace_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    input_fingerprint: Mapped[str] = mapped_column(String(64))
+    worker_container_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    execution_token_hash: Mapped[str] = mapped_column(String(64))
+    execution_token_prefix: Mapped[str] = mapped_column(String(16))
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    logs_text: Mapped[str] = mapped_column(Text, default="")
+    timeout_seconds: Mapped[int] = mapped_column(Integer)
+    memory_mb: Mapped[int] = mapped_column(Integer)
+    cpu_limit: Mapped[str] = mapped_column(String(32))
+    pids_limit: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    project: Mapped[Project] = orm_relationship(back_populates="execution_runs")
+    analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="execution_runs")
+    configuration: Mapped[InstrumentationConfig] = orm_relationship(back_populates="execution_runs")

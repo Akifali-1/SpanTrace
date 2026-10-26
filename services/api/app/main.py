@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 import hashlib
+import json
 from typing import Annotated, Any
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,10 +14,12 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import get_settings
 from .db import Base, engine, get_db
+from .db import SessionLocal
+from .execution import ExecutionCoordinator, execution_token, input_fingerprint, serialize_execution, token_hash, redact_value
 from .graph import build_execution_graph
 from .incident import evaluate_incidents
 from .integrations import diagnostics_for_project
-from .models import ApiKey, InstrumentationConfig, Project, RegressionCase, RegressionRun, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship, Run, TraceEvent
+from .models import ApiKey, ExecutionRun, InstrumentationConfig, Project, RegressionCase, RegressionRun, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship, Run, TraceEvent
 from .repository import (
     RepositoryImportError,
     fetch_public_github_archive,
@@ -28,17 +32,20 @@ from .repository import (
     serialize_config,
 )
 from .regression import run_booking_regression
-from .schemas import EventBatch, InstrumentationConfigSelection, KeyCreate, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, RepositoryUrlImport, event_dict
+from .schemas import EventBatch, ExecutionCancel, ExecutionCreate, InstrumentationConfigSelection, KeyCreate, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, RepositoryUrlImport, event_dict
 from .security import issue_key, project_for_key, revoke_key
 from .serialization import iso, serialize_event, serialize_run
 
 settings = get_settings()
+execution_coordinator = ExecutionCoordinator(settings, SessionLocal)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    execution_coordinator.reconcile()
     yield
+    execution_coordinator.shutdown()
 
 
 app = FastAPI(title="SpanTrace API", version="0.2.0", lifespan=lifespan)
@@ -167,12 +174,13 @@ def delete_key(key_id: str, project: ProjectDep, db: Db) -> dict[str, str]:
     return {"status": "revoked"}
 
 
-@app.post("/v1/ingest/events")
-def ingest_events(payload: EventBatch, project: ProjectDep, db: Db) -> dict[str, Any]:
+def _ingest_events(payload: EventBatch, project: Project, db: Session, *, expected_trace_id: str | None = None) -> dict[str, Any]:
     accepted = 0
     duplicate = 0
     run_ids: set[str] = set()
     for event in payload.events:
+        if expected_trace_id is not None and event.trace_id != expected_trace_id:
+            raise HTTPException(status_code=403, detail="Execution telemetry trace does not match the authorized run.")
         # Pydantic has already rejected malformed fields. The extra-field policy
         # lets forward-compatible adapters send fields this server does not yet use.
         if len(event.model_dump_json()) > settings.max_event_bytes:
@@ -198,6 +206,11 @@ def ingest_events(payload: EventBatch, project: ProjectDep, db: Db) -> dict[str,
         # safely retry; no partial response is advertised as accepted.
         raise HTTPException(status_code=409, detail="Duplicate event submission raced with another request.")
     return {"accepted": accepted, "duplicates": duplicate, "trace_ids": sorted(run_ids)}
+
+
+@app.post("/v1/ingest/events")
+def ingest_events(payload: EventBatch, project: ProjectDep, db: Db) -> dict[str, Any]:
+    return _ingest_events(payload, project, db)
 
 
 @app.get("/v1/runs")
@@ -239,6 +252,134 @@ def get_run(trace_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
 @app.get("/v1/integrations")
 def list_integrations(project: ProjectDep, db: Db) -> dict[str, Any]:
     return {"items": diagnostics_for_project(db, project)}
+
+
+def _execution_for_project(db: Session, project_id: str, execution_id: str) -> ExecutionRun | None:
+    return db.scalar(
+        select(ExecutionRun)
+        .options(joinedload(ExecutionRun.analysis), joinedload(ExecutionRun.configuration))
+        .where(ExecutionRun.id == execution_id, ExecutionRun.project_id == project_id)
+    )
+
+
+@app.get("/v1/executions")
+def list_executions(project: ProjectDep, db: Db, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    executions = db.scalars(select(ExecutionRun).where(ExecutionRun.project_id == project.id).order_by(ExecutionRun.created_at.desc()).limit(limit)).all()
+    return {"items": [serialize_execution(item, include_logs=False) for item in executions]}
+
+
+@app.get("/v1/executions/{execution_id}")
+def get_execution(execution_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    execution = _execution_for_project(db, project.id, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    result = serialize_execution(execution)
+    run = db.scalar(select(Run).where(Run.project_id == project.id, Run.trace_id == execution.trace_id))
+    result["trace_available"] = run is not None
+    return result
+
+
+@app.post("/v1/executions/{execution_id}/cancel")
+def cancel_execution(execution_id: str, payload: ExecutionCancel, project: ProjectDep, db: Db) -> dict[str, Any]:
+    execution = _execution_for_project(db, project.id, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    if execution.status in {"succeeded", "failed", "timed_out", "cancelled", "infrastructure_error"}:
+        return {"execution": serialize_execution(execution), "cancelled": False}
+    if not execution_coordinator.request_cancel(execution_id):
+        raise HTTPException(status_code=409, detail="Execution is no longer cancellable.")
+    db.refresh(execution)
+    return {"execution": serialize_execution(execution), "cancelled": True, "reason": payload.reason}
+
+
+@app.post("/v1/executions/{execution_id}/events")
+def ingest_execution_events(execution_id: str, payload: EventBatch, db: Db, x_execution_token: Annotated[str | None, Header(alias="X-Execution-Token")] = None) -> dict[str, Any]:
+    if not x_execution_token:
+        raise HTTPException(status_code=401, detail="Execution token is required.")
+    execution = db.scalar(select(ExecutionRun).where(ExecutionRun.id == execution_id, ExecutionRun.execution_token_hash == token_hash(x_execution_token)))
+    if not execution:
+        raise HTTPException(status_code=401, detail="Invalid execution token.")
+    if execution.status in {"succeeded", "failed", "timed_out", "cancelled", "infrastructure_error"}:
+        raise HTTPException(status_code=409, detail="The execution is already terminal.")
+    project = db.get(Project, execution.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Execution project not found.")
+    return _ingest_events(payload, project, db, expected_trace_id=execution.trace_id)
+
+
+@app.post("/v1/repositories/{analysis_id}/executions", status_code=202)
+def create_execution(analysis_id: str, payload: ExecutionCreate, project: ProjectDep, db: Db) -> dict[str, Any]:
+    analysis = load_analysis(db, project.id, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found.")
+    if analysis.status not in {"analysis_complete", "partially_analyzed"} or not analysis.source_path:
+        raise HTTPException(status_code=409, detail="This repository analysis has no executable source snapshot.")
+    finding = next((item for item in analysis.findings if item.stable_id == payload.workflow_entry_point_id), None)
+    if not finding or finding.kind != "workflow_entry":
+        raise HTTPException(status_code=422, detail="Select a discovered workflow entry point.")
+    configuration = next((item for item in analysis.configurations if item.id == payload.configuration_id), None)
+    if not configuration or configuration.project_id != project.id:
+        raise HTTPException(status_code=404, detail="Instrumentation configuration not found for this analysis.")
+    if not configuration.valid or configuration.stale:
+        raise HTTPException(status_code=409, detail="The selected instrumentation configuration is invalid or stale. Save a configuration for the current source revision.")
+    config_source = (configuration.config_json or {}).get("source", {})
+    if config_source.get("archive_fingerprint") != analysis.archive_fingerprint or config_source.get("source_revision") != analysis.source_revision:
+        raise HTTPException(status_code=409, detail="The selected instrumentation configuration belongs to a different source revision.")
+    selected_entries = {str(item.get("finding_id")) for item in (configuration.config_json or {}).get("workflow_entry_points", []) if isinstance(item, dict)}
+    if finding.stable_id not in selected_entries:
+        raise HTTPException(status_code=422, detail="The selected workflow entry point is not included in the instrumentation configuration.")
+    if not finding.file_path.endswith(".py") or not finding.symbol_name:
+        raise HTTPException(status_code=422, detail="Only discovered Python function entry points are supported by the controlled execution MVP.")
+    try:
+        encoded_input = json.dumps(payload.inputs, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Workflow inputs must be JSON-serializable.") from exc
+    if len(encoded_input) > settings.execution_input_bytes:
+        raise HTTPException(status_code=413, detail="Workflow inputs exceed the configured execution limit.")
+    default_key = hashlib.sha256(f"{analysis.id}:{configuration.id}:{finding.stable_id}:{analysis.source_revision}:".encode() + encoded_input).hexdigest()
+    idempotency_key = payload.idempotency_key or default_key
+    existing = db.scalar(select(ExecutionRun).where(ExecutionRun.project_id == project.id, ExecutionRun.idempotency_key == idempotency_key))
+    if existing:
+        return {"execution": serialize_execution(existing), "reused": True}
+    raw_token = execution_token()
+    execution = ExecutionRun(
+        project_id=project.id,
+        analysis_id=analysis.id,
+        configuration_id=configuration.id,
+        source_revision=analysis.source_revision,
+        archive_fingerprint=analysis.archive_fingerprint,
+        entry_finding_id=finding.stable_id,
+        entry_file_path=finding.file_path,
+        entry_symbol=finding.symbol_name,
+        trace_id=f"execution-{uuid4().hex}",
+        idempotency_key=idempotency_key,
+        status="queued",
+        input_json=redact_value(payload.inputs),
+        input_fingerprint=input_fingerprint(payload.inputs),
+        execution_token_hash=token_hash(raw_token),
+        execution_token_prefix=raw_token[:16],
+        result_json={},
+        logs_text="",
+        timeout_seconds=settings.execution_timeout_seconds,
+        memory_mb=settings.execution_memory_mb,
+        cpu_limit=str(settings.execution_cpu_limit),
+        pids_limit=settings.execution_pids_limit,
+    )
+    db.add(execution)
+    db.commit()
+    db.refresh(execution)
+    execution_coordinator.submit(execution.id, raw_token, payload.inputs)
+    return {"execution": serialize_execution(execution), "reused": False}
+
+
+@app.get("/v1/executions/{execution_id}/trace")
+def get_execution_trace(execution_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    execution = _execution_for_project(db, project.id, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    if not db.scalar(select(Run).where(Run.project_id == project.id, Run.trace_id == execution.trace_id)):
+        raise HTTPException(status_code=404, detail="Execution trace is not available yet.")
+    return get_run(execution.trace_id, project, db)
 
 
 def _repository_error(exc: RepositoryImportError) -> HTTPException:

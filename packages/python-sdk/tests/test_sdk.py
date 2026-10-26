@@ -58,6 +58,28 @@ def test_capture_disabled_and_network_failure_is_non_fatal(monkeypatch):
     assert scope.last_error is not None
 
 
+def test_execution_scope_uses_run_scoped_telemetry_endpoint(monkeypatch):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    scope = AgentScope(
+        api_key=None,
+        execution_id="execution-1",
+        execution_token="sexec-test",
+        endpoint="http://worker-api",
+        batch_size=100,
+    )
+    with scope.trace("controlled", trace_id="execution-trace"):
+        pass
+    assert requests[0].full_url == "http://worker-api/v1/executions/execution-1/events"
+    assert requests[0].get_header("X-execution-token") == "sexec-test"
+    assert requests[0].get_header("X-api-key") is None
+
+
 def test_strict_network_failure_raises(monkeypatch):
     def fail(*args, **kwargs):
         raise urllib.error.URLError("offline")

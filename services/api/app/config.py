@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     repository_max_depth: int = Field(default=20, validation_alias=AliasChoices("SPANTRACE_REPOSITORY_MAX_DEPTH", "AGENTSCOPE_REPOSITORY_MAX_DEPTH"))
     repository_analysis_max_source_bytes: int = Field(default=12 * 1024 * 1024, validation_alias=AliasChoices("SPANTRACE_REPOSITORY_ANALYSIS_MAX_SOURCE_BYTES", "AGENTSCOPE_REPOSITORY_ANALYSIS_MAX_SOURCE_BYTES"))
     repository_http_timeout_seconds: float = Field(default=20.0, validation_alias=AliasChoices("SPANTRACE_REPOSITORY_HTTP_TIMEOUT_SECONDS", "AGENTSCOPE_REPOSITORY_HTTP_TIMEOUT_SECONDS"))
+    execution_worker_image: str = Field(default="spantrace-worker:0.1.0", validation_alias=AliasChoices("SPANTRACE_EXECUTION_WORKER_IMAGE", "AGENTSCOPE_EXECUTION_WORKER_IMAGE"))
+    execution_worker_api_url: str = Field(default="http://host.docker.internal:8070", validation_alias=AliasChoices("SPANTRACE_EXECUTION_WORKER_API_URL", "AGENTSCOPE_EXECUTION_WORKER_API_URL"))
+    execution_timeout_seconds: int = Field(default=120, ge=5, le=3600, validation_alias=AliasChoices("SPANTRACE_EXECUTION_TIMEOUT_SECONDS", "AGENTSCOPE_EXECUTION_TIMEOUT_SECONDS"))
+    execution_memory_mb: int = Field(default=256, ge=64, le=2048, validation_alias=AliasChoices("SPANTRACE_EXECUTION_MEMORY_MB", "AGENTSCOPE_EXECUTION_MEMORY_MB"))
+    execution_cpu_limit: float = Field(default=1.0, gt=0, le=4, validation_alias=AliasChoices("SPANTRACE_EXECUTION_CPU_LIMIT", "AGENTSCOPE_EXECUTION_CPU_LIMIT"))
+    execution_pids_limit: int = Field(default=64, ge=16, le=512, validation_alias=AliasChoices("SPANTRACE_EXECUTION_PIDS_LIMIT", "AGENTSCOPE_EXECUTION_PIDS_LIMIT"))
+    execution_log_bytes: int = Field(default=256 * 1024, ge=16 * 1024, le=2 * 1024 * 1024, validation_alias=AliasChoices("SPANTRACE_EXECUTION_LOG_BYTES", "AGENTSCOPE_EXECUTION_LOG_BYTES"))
+    execution_input_bytes: int = Field(default=64 * 1024, ge=1024, le=512 * 1024, validation_alias=AliasChoices("SPANTRACE_EXECUTION_INPUT_BYTES", "AGENTSCOPE_EXECUTION_INPUT_BYTES"))
 
     @property
     def cors_origin_list(self) -> list[str]:

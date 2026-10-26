@@ -169,7 +169,21 @@ GitHub import is public-only in this task. It validates HTTPS GitHub hosts, reje
 
 Relevant local settings are `SPANTRACE_REPOSITORY_STORAGE_PATH`, `SPANTRACE_REPOSITORY_MAX_ARCHIVE_BYTES`, `SPANTRACE_REPOSITORY_MAX_EXTRACTED_BYTES`, `SPANTRACE_REPOSITORY_MAX_FILES`, `SPANTRACE_REPOSITORY_MAX_FILE_BYTES`, `SPANTRACE_REPOSITORY_MAX_DEPTH`, `SPANTRACE_REPOSITORY_ANALYSIS_MAX_SOURCE_BYTES`, and `SPANTRACE_REPOSITORY_HTTP_TIMEOUT_SECONDS`. The default storage directory `.spantrace-data/` is ignored by Git.
 
-Repository analysis is a Task 3 capability. Controlled execution, dependency installation, arbitrary runners, dashboard-triggered application execution, automatic source edits, and autonomous debugging loops remain intentionally deferred to Task 4.
+Repository analysis is a Task 3 capability. Broad dependency installation, arbitrary runners, automatic source edits, and autonomous debugging loops remain out of scope; the narrow controlled execution path is described below.
+
+## Controlled execution MVP
+
+Task 4 adds one deliberately narrow execution path for a validated Python function selected from a Task 3 analysis. Build the project-controlled worker image explicitly:
+
+```bash
+docker build -f services/worker/Dockerfile -t spantrace-worker:0.1.0 .
+```
+
+After starting the API and dashboard, save a valid repository instrumentation configuration, then use **Launch isolated workflow** on the repository detail page. The API creates a durable execution record and launches a short-lived `spantrace-worker` container. The worker receives only the selected source snapshot, bounded JSON input, a run-scoped telemetry capability, and the selected adapter. The dashboard polls the persisted execution state and links completed executions to the existing runtime trace page.
+
+The worker runs as UID 1000 with a read-only root filesystem, read-only source bind mount, dropped capabilities, `no-new-privileges`, bounded memory/CPU/PIDs/logs, a no-exec temporary filesystem, and automatic cleanup. The default bridge network is required for local telemetry delivery to `SPANTRACE_EXECUTION_WORKER_API_URL`; this is not a complete network sandbox, and Docker itself remains an important security boundary assumption. The API never imports or runs repository source. Docker Engine must be available; if Docker or the image is unavailable, the run becomes `infrastructure_error` with a retryable explanation rather than reporting success.
+
+Only Python function entry points from an analyzed source snapshot are supported by this MVP. Arbitrary dependency installation, shell access, source modification, general-purpose runners, and autonomous debugging remain out of scope. Worker telemetry uses the existing event schema through a short-lived run-scoped token at `/v1/executions/{id}/events`; project API keys are not sent to the worker.
 
 ## Tests and checks
 

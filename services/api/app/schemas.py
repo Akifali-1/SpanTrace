@@ -94,6 +94,17 @@ class InstrumentationConfigDocument(BaseModel):
     notes: str
 
 
+class ExecutionCreate(BaseModel):
+    workflow_entry_point_id: str = Field(min_length=1, max_length=64)
+    configuration_id: str = Field(min_length=1, max_length=36)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ExecutionCancel(BaseModel):
+    reason: str = Field(default="Cancelled by user", min_length=1, max_length=240)
+
+
 def event_dict(event: TraceEventIn) -> dict[str, Any]:
     data = event.model_dump()
     data["input_json"] = data.pop("input")
