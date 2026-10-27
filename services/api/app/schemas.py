@@ -65,6 +65,22 @@ class RegressionRunRequest(BaseModel):
     fixed: bool = False
 
 
+class InvestigationCreate(BaseModel):
+    name: str = Field(default="Automated debugging investigation", min_length=1, max_length=200)
+
+
+class ReproductionRequest(BaseModel):
+    inputs: dict[str, Any] | None = None
+
+
+class PatchDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+
+
+class VerificationRequest(BaseModel):
+    run_controlled_rerun: bool = True
+
+
 class RepositoryUrlImport(BaseModel):
     url: str = Field(min_length=1, max_length=500)
     ref: str | None = Field(default=None, max_length=200)

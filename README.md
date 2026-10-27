@@ -169,7 +169,7 @@ GitHub import is public-only in this task. It validates HTTPS GitHub hosts, reje
 
 Relevant local settings are `SPANTRACE_REPOSITORY_STORAGE_PATH`, `SPANTRACE_REPOSITORY_MAX_ARCHIVE_BYTES`, `SPANTRACE_REPOSITORY_MAX_EXTRACTED_BYTES`, `SPANTRACE_REPOSITORY_MAX_FILES`, `SPANTRACE_REPOSITORY_MAX_FILE_BYTES`, `SPANTRACE_REPOSITORY_MAX_DEPTH`, `SPANTRACE_REPOSITORY_ANALYSIS_MAX_SOURCE_BYTES`, and `SPANTRACE_REPOSITORY_HTTP_TIMEOUT_SECONDS`. The default storage directory `.spantrace-data/` is ignored by Git.
 
-Repository analysis is a Task 3 capability. Broad dependency installation, arbitrary runners, automatic source edits, and autonomous debugging loops remain out of scope; the narrow controlled execution path is described below.
+Repository analysis is a Task 3 capability. Broad dependency installation, arbitrary runners, and automatic edits to the original checkout remain out of scope; Task 5 uses only the isolated, project-controlled workflows described below.
 
 ## Controlled execution MVP
 
@@ -183,7 +183,22 @@ After starting the API and dashboard, save a valid repository instrumentation co
 
 The worker runs as UID 1000 with a read-only root filesystem, read-only source bind mount, dropped capabilities, `no-new-privileges`, bounded memory/CPU/PIDs/logs, a no-exec temporary filesystem, and automatic cleanup. The default bridge network is required for local telemetry delivery to `SPANTRACE_EXECUTION_WORKER_API_URL`; this is not a complete network sandbox, and Docker itself remains an important security boundary assumption. The API never imports or runs repository source. Docker Engine must be available; if Docker or the image is unavailable, the run becomes `infrastructure_error` with a retryable explanation rather than reporting success.
 
-Only Python function entry points from an analyzed source snapshot are supported by this MVP. Arbitrary dependency installation, shell access, source modification, general-purpose runners, and autonomous debugging remain out of scope. Worker telemetry uses the existing event schema through a short-lived run-scoped token at `/v1/executions/{id}/events`; project API keys are not sent to the worker.
+Only Python function entry points from an analyzed source snapshot are supported by this MVP. Arbitrary dependency installation, shell access, and general-purpose runners remain out of scope. Worker telemetry uses the existing event schema through a short-lived run-scoped token at `/v1/executions/{id}/events`; project API keys are not sent to the worker.
+
+## Automated debugging and verified fixes
+
+Task 5 connects a real failed trace or controlled execution to a durable investigation:
+
+1. Select **Start investigation** from a failed trace or execution.
+2. Review the preserved failure evidence and ranked root-cause candidates. Source references always include the imported revision and actual file/line evidence when available.
+3. Start a controlled reproduction. A trace-only case is reported as blocked when inputs or a source snapshot cannot be recovered.
+4. Generate a deterministic regression test and confirm that it fails against the original snapshot for the intended signature.
+5. Generate and review the minimal isolated diff. Approving it records human review but never changes the original working tree.
+6. Run the regression test, relevant existing tests, and a patched controlled workflow rerun. Only persisted passing evidence can produce `verified`.
+
+The API surfaces this workflow under `/v1/investigations`, `/v1/executions/{id}/investigations`, and `/v1/runs/{trace_id}/investigations`. Generated tests and patches are limited to the supported deterministic e-commerce discount and travel budget fixtures; other repositories receive an honest blocked or inconclusive result instead of a fabricated fix.
+
+Generated-test execution uses the existing worker image in a read-only, capability-dropped Docker container with no network, bounded CPU/memory/PIDs, and a project-isolated source snapshot. The patched controlled rerun uses the same Task 4 coordinator and run-scoped telemetry authorization.
 
 ## Tests and checks
 

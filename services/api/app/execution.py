@@ -65,6 +65,85 @@ def redact_text(value: str, max_bytes: int) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore") + "\n[log output truncated]"
 
 
+def run_isolated_unittest(settings: Settings, source_root: str | Path, test_file: str, *, timeout_seconds: int | None = None) -> dict[str, Any]:
+    """Run one repository test file inside the existing restricted worker image."""
+
+    root = Path(source_root).expanduser().resolve()
+    storage_root = Path(settings.repository_storage_path).expanduser().resolve()
+    try:
+        root.relative_to(storage_root)
+    except ValueError:
+        return {"status": "blocked", "reason": "The test source is outside project-isolated repository storage."}
+    relative = PurePosixPath(test_file.replace("\\", "/"))
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts) or relative.suffix != ".py":
+        return {"status": "blocked", "reason": "The test path must be a relative Python file."}
+    candidate = root.joinpath(*relative.parts).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return {"status": "blocked", "reason": "The test path escapes the isolated source snapshot."}
+    if not candidate.is_file() or candidate.is_symlink():
+        return {"status": "blocked", "reason": "The test file is not available in the isolated source snapshot."}
+    if shutil.which("docker") is None:
+        return {"status": "blocked", "reason": "Docker CLI is not available to the SpanTrace API process.", "failure_category": "docker_unavailable"}
+    image_check = subprocess.run(["docker", "image", "inspect", settings.execution_worker_image], capture_output=True, text=True, timeout=15, check=False)
+    if image_check.returncode != 0:
+        return {"status": "blocked", "reason": f"Worker image {settings.execution_worker_image} is unavailable.", "failure_category": "image_unavailable"}
+
+    container = f"spantrace-test-{uuid4().hex[:12]}"
+    command = [
+        "docker", "run", "--rm", "--name", container,
+        "--user", "1000:1000", "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", f"--pids-limit={settings.execution_pids_limit}",
+        f"--memory={settings.execution_memory_mb}m", f"--cpus={settings.execution_cpu_limit}",
+        "--network", "none", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+        "--mount", f"type=bind,source={root},target=/workspace/source,readonly",
+        "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "PYTHONUNBUFFERED=1",
+        settings.execution_worker_image,
+        "--source-root", "/workspace/source", "--test-file", "/workspace/source/" + "/".join(relative.parts),
+    ]
+    started = time.monotonic()
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    try:
+        output, _ = process.communicate(timeout=timeout_seconds or settings.execution_timeout_seconds)
+        code = process.returncode
+    except subprocess.TimeoutExpired:
+        _kill_named_container(container)
+        process.kill()
+        output, _ = process.communicate(timeout=5)
+        return {"status": "blocked", "failure_category": "timeout", "exit_code": process.returncode, "duration_ms": int((time.monotonic() - started) * 1000), "logs": redact_text(output or "", settings.execution_log_bytes), "reason": "The isolated test exceeded the configured timeout."}
+    finally:
+        _kill_named_container(container)
+    logs = redact_text(output or "", settings.execution_log_bytes)
+    result: dict[str, Any] = {}
+    for line in reversed((output or "").splitlines()):
+        if line.startswith("SPANTRACE_TEST_RESULT="):
+            try:
+                parsed = json.loads(line.split("=", 1)[1])
+                if isinstance(parsed, dict):
+                    result = parsed
+            except json.JSONDecodeError:
+                result = {}
+            break
+    passed = code == 0 and bool(result.get("success", code == 0))
+    return {
+        "status": "passed" if passed else "failed",
+        "exit_code": code,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "tests_run": result.get("tests_run", 0),
+        "failures": result.get("failures", []),
+        "errors": result.get("errors", []),
+        "skipped": result.get("skipped", 0),
+        "logs": logs,
+        "failure_category": None if passed else "test_failure",
+    }
+
+
+def _kill_named_container(container: str) -> None:
+    subprocess.run(["docker", "kill", container], capture_output=True, text=True, timeout=15, check=False)
+    subprocess.run(["docker", "rm", "-f", container], capture_output=True, text=True, timeout=15, check=False)
+
+
 def transition_status(execution: ExecutionRun, target: str) -> None:
     current = execution.status
     if current in TERMINAL_STATUSES:
@@ -103,6 +182,7 @@ def serialize_execution(execution: ExecutionRun, *, include_logs: bool = True) -
         "memory_mb": execution.memory_mb,
         "cpu_limit": execution.cpu_limit,
         "pids_limit": execution.pids_limit,
+        "source_override": bool(execution.source_override_path),
         "created_at": execution.created_at.isoformat() + "Z",
         "started_at": execution.started_at.isoformat() + "Z" if execution.started_at else None,
         "completed_at": execution.completed_at.isoformat() + "Z" if execution.completed_at else None,
@@ -221,7 +301,7 @@ class ExecutionCoordinator:
             if image_check.returncode != 0:
                 self._set_status(execution_id, "infrastructure_error", failure_category="image_unavailable", logs=f"Worker image {self.settings.execution_worker_image} is unavailable. Build it with: docker build -f services/worker/Dockerfile -t {self.settings.execution_worker_image} .")
                 return
-            source_root = Path(analysis.source_path or "").resolve()
+            source_root = Path(execution.source_override_path or analysis.source_path or "").resolve()
             storage_root = Path(self.settings.repository_storage_path).expanduser().resolve()
             source_root.relative_to(storage_root)
             entry_path = PurePosixPath(execution.entry_file_path)

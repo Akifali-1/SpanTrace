@@ -25,6 +25,7 @@ class Project(Base):
     runs: Mapped[list["Run"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     repository_analyses: Mapped[list["RepositoryAnalysis"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     execution_runs: Mapped[list["ExecutionRun"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
+    investigations: Mapped[list["DebugInvestigation"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class ApiKey(Base):
@@ -242,6 +243,7 @@ class ExecutionRun(Base):
     memory_mb: Mapped[int] = mapped_column(Integer)
     cpu_limit: Mapped[str] = mapped_column(String(32))
     pids_limit: Mapped[int] = mapped_column(Integer)
+    source_override_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -249,3 +251,164 @@ class ExecutionRun(Base):
     project: Mapped[Project] = orm_relationship(back_populates="execution_runs")
     analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="execution_runs")
     configuration: Mapped[InstrumentationConfig] = orm_relationship(back_populates="execution_runs")
+
+
+class DebugInvestigation(Base):
+    __tablename__ = "debug_investigations"
+    __table_args__ = (
+        Index("ix_debug_investigations_project_created", "project_id", "created_at"),
+        Index("ix_debug_investigations_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    original_execution_id: Mapped[str | None] = mapped_column(ForeignKey("execution_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    original_trace_id: Mapped[str] = mapped_column(String(128), index=True)
+    analysis_id: Mapped[str | None] = mapped_column(ForeignKey("repository_analyses.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_revision: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    archive_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    failure_category: Mapped[str] = mapped_column(String(64), default="unknown")
+    failure_summary: Mapped[str] = mapped_column(Text, default="")
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    missing_evidence_json: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    project: Mapped[Project] = orm_relationship(back_populates="investigations")
+    original_execution: Mapped[ExecutionRun | None] = orm_relationship(foreign_keys=[original_execution_id])
+    analysis: Mapped[RepositoryAnalysis | None] = orm_relationship(foreign_keys=[analysis_id])
+    candidates: Mapped[list["RootCauseCandidate"]] = orm_relationship(back_populates="investigation", cascade="all, delete-orphan", order_by="RootCauseCandidate.rank")
+    reproductions: Mapped[list["ReproductionAttempt"]] = orm_relationship(back_populates="investigation", cascade="all, delete-orphan", order_by="ReproductionAttempt.created_at")
+    regression_tests: Mapped[list["RegressionTestArtifact"]] = orm_relationship(back_populates="investigation", cascade="all, delete-orphan", order_by="RegressionTestArtifact.created_at")
+    patches: Mapped[list["ProposedPatch"]] = orm_relationship(back_populates="investigation", cascade="all, delete-orphan", order_by="ProposedPatch.created_at")
+    verifications: Mapped[list["VerificationRun"]] = orm_relationship(back_populates="investigation", cascade="all, delete-orphan", order_by="VerificationRun.created_at")
+
+
+class RootCauseCandidate(Base):
+    __tablename__ = "root_cause_candidates"
+    __table_args__ = (Index("ix_root_cause_candidates_investigation_rank", "investigation_id", "rank"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    investigation_id: Mapped[str] = mapped_column(ForeignKey("debug_investigations.id", ondelete="CASCADE"), index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    category: Mapped[str] = mapped_column(String(64))
+    explanation: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[str] = mapped_column(String(32))
+    source_revision: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_start_line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_end_line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trace_event_ids: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    supporting_evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    contradictory_evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    next_step: Mapped[str] = mapped_column(Text, default="")
+    evidence_kind: Mapped[str] = mapped_column(String(32), default="inference")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="candidates")
+
+
+class ReproductionAttempt(Base):
+    __tablename__ = "reproduction_attempts"
+    __table_args__ = (Index("ix_reproduction_attempts_investigation_created", "investigation_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    investigation_id: Mapped[str] = mapped_column(ForeignKey("debug_investigations.id", ondelete="CASCADE"), index=True)
+    original_execution_id: Mapped[str | None] = mapped_column(ForeignKey("execution_runs.id", ondelete="SET NULL"), nullable=True)
+    reproduction_execution_id: Mapped[str | None] = mapped_column(ForeignKey("execution_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    original_trace_id: Mapped[str] = mapped_column(String(128))
+    reproduction_trace_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_revision: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    input_provenance_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    configuration_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    environment_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    differences_json: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    signature_match: Mapped[bool | None] = mapped_column(nullable=True)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    logs_text: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="reproductions")
+    original_execution: Mapped[ExecutionRun | None] = orm_relationship(foreign_keys=[original_execution_id])
+    reproduction_execution: Mapped[ExecutionRun | None] = orm_relationship(foreign_keys=[reproduction_execution_id])
+
+
+class RegressionTestArtifact(Base):
+    __tablename__ = "regression_test_artifacts"
+    __table_args__ = (Index("ix_regression_test_artifacts_investigation_created", "investigation_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    investigation_id: Mapped[str] = mapped_column(ForeignKey("debug_investigations.id", ondelete="CASCADE"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("root_cause_candidates.id", ondelete="SET NULL"), nullable=True)
+    source_revision: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    file_path: Mapped[str] = mapped_column(String(500))
+    code: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    expected_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    source_evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    assumptions_json: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    workspace_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="generated", index=True)
+    original_result_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    patched_result_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="regression_tests")
+    candidate: Mapped[RootCauseCandidate | None] = orm_relationship()
+
+
+class ProposedPatch(Base):
+    __tablename__ = "proposed_patches"
+    __table_args__ = (Index("ix_proposed_patches_investigation_created", "investigation_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    investigation_id: Mapped[str] = mapped_column(ForeignKey("debug_investigations.id", ondelete="CASCADE"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("root_cause_candidates.id", ondelete="SET NULL"), nullable=True)
+    regression_test_id: Mapped[str | None] = mapped_column(ForeignKey("regression_test_artifacts.id", ondelete="SET NULL"), nullable=True)
+    base_source_revision: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    base_archive_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    patch_text: Mapped[str] = mapped_column(Text)
+    explanation: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    change_json: Mapped[list[dict[str, str]]] = mapped_column(JSONType, default=list)
+    workspace_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending_review", index=True)
+    decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="patches")
+    candidate: Mapped[RootCauseCandidate | None] = orm_relationship()
+    regression_test: Mapped[RegressionTestArtifact | None] = orm_relationship()
+
+
+class VerificationRun(Base):
+    __tablename__ = "verification_runs"
+    __table_args__ = (Index("ix_verification_runs_investigation_created", "investigation_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    investigation_id: Mapped[str] = mapped_column(ForeignKey("debug_investigations.id", ondelete="CASCADE"), index=True)
+    patch_id: Mapped[str] = mapped_column(ForeignKey("proposed_patches.id", ondelete="CASCADE"), index=True)
+    regression_test_id: Mapped[str] = mapped_column(ForeignKey("regression_test_artifacts.id", ondelete="CASCADE"), index=True)
+    original_execution_id: Mapped[str | None] = mapped_column(ForeignKey("execution_runs.id", ondelete="SET NULL"), nullable=True)
+    patched_execution_id: Mapped[str | None] = mapped_column(ForeignKey("execution_runs.id", ondelete="SET NULL"), nullable=True)
+    original_trace_id: Mapped[str] = mapped_column(String(128))
+    patched_trace_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    original_test_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    patched_test_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    existing_tests_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    command_results_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    report_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="verifications")
+    patch: Mapped[ProposedPatch] = orm_relationship()
+    regression_test: Mapped[RegressionTestArtifact] = orm_relationship()
+    original_execution: Mapped[ExecutionRun | None] = orm_relationship(foreign_keys=[original_execution_id])
+    patched_execution: Mapped[ExecutionRun | None] = orm_relationship(foreign_keys=[patched_execution_id])

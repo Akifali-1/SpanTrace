@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import sys
+import unittest
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -52,13 +53,43 @@ def _invoke(function: Any, inputs: dict[str, Any]) -> Any:
     return asyncio.run(value) if inspect.isawaitable(value) else value
 
 
+def _run_test_file(root: Path, test_file: str) -> int:
+    candidate = Path(test_file).resolve()
+    candidate.relative_to(root.resolve())
+    if candidate.suffix != ".py" or not candidate.is_file() or candidate.is_symlink():
+        raise ValueError("Invalid isolated test file")
+    sys.path.insert(0, str(root))
+    module_name = f"spantrace_test_{candidate.stem}_{os.getpid()}"
+    spec = importlib.util.spec_from_file_location(module_name, candidate)
+    if spec is None or spec.loader is None:
+        raise ImportError("Could not load the isolated test file")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+    result = unittest.TextTestRunner(stream=sys.stdout, verbosity=2).run(suite)
+    summary = {
+        "success": result.wasSuccessful(),
+        "tests_run": result.testsRun,
+        "failures": [str(test) for test, _ in result.failures],
+        "errors": [str(test) for test, _ in result.errors],
+        "skipped": len(result.skipped),
+    }
+    print("SPANTRACE_TEST_RESULT=" + json.dumps(summary, separators=(",", ":")), flush=True)
+    return 0 if result.wasSuccessful() else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", required=True)
-    parser.add_argument("--entry-file", required=True)
-    parser.add_argument("--entry-symbol", required=True)
+    parser.add_argument("--entry-file")
+    parser.add_argument("--entry-symbol")
+    parser.add_argument("--test-file")
     args = parser.parse_args()
     root = Path(args.source_root).resolve()
+    if args.test_file:
+        return _run_test_file(root, args.test_file)
+    if not args.entry_file or not args.entry_symbol:
+        raise ValueError("A workflow entry file and symbol are required")
     inputs = json.loads(os.environ.get("SPANTRACE_EXECUTION_INPUT", "{}"))
     if not isinstance(inputs, dict):
         raise ValueError("Execution input must be a JSON object")
