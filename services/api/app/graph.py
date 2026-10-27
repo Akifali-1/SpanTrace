@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 def _event_node(event: Any) -> dict[str, Any]:
     return {
+        "node_id": event.event_id,
         "event_id": event.event_id,
         "span_id": event.span_id,
         "parent_span_id": event.parent_span_id,
@@ -14,11 +15,16 @@ def _event_node(event: Any) -> dict[str, Any]:
         "kind": event.kind,
         "status": event.status,
         "occurred_at": event.occurred_at.isoformat() + "Z",
+        "ended_at": event.ended_at.isoformat() + "Z" if event.ended_at else None,
+        "duration_ms": event.duration_ms,
         "integration": event.integration,
         "framework": event.framework,
         "relationship": event.relationship,
         "relationship_confidence": event.relationship_confidence,
         "handoff_to": event.handoff_to,
+        "error_type": event.error_type,
+        "error_details": event.error_details,
+        "metadata": event.metadata_json or {},
     }
 
 
@@ -47,7 +53,7 @@ def build_execution_graph(events: Iterable[Any]) -> dict[str, Any]:
                 # Lifecycle events can reuse the root span ID. Link children to
                 # the first observed root node instead of making run_completed
                 # appear to be their parent.
-                edges.append({"from": parents[0]["event_id"], "to": node["event_id"], "type": "parent", "confidence": "observed"})
+                edges.append({"from": parents[0]["event_id"], "to": node["event_id"], "type": "parent", "confidence": event.relationship_confidence or "observed"})
             else:
                 unresolved_parents += 1
                 edges.append({"from": event.parent_span_id, "to": node["event_id"], "type": "missing_parent", "confidence": "unknown"})
