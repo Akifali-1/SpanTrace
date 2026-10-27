@@ -1,28 +1,24 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
 import "./globals.css";
+import AppShell from "./components/app-shell";
+import { ThemeProvider } from "./components/theme-provider";
+
+const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
+const geistLanding = Geist({ variable: "--font-geist", subsets: ["latin"] });
+const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+const instrument = Instrument_Serif({ variable: "--font-instrument", subsets: ["latin"], weight: "400", style: ["normal", "italic"] });
 
 export const metadata: Metadata = {
-  title: "SpanTrace · Multi-agent observability",
-  description: "Evidence-backed traces for multi-agent systems.",
+  title: "SpanTrace — evidence over guesswork",
+  description: "Replay a multi-agent incident from trace to verified fix.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body>
-        <div className="app-shell">
-          <header className="topbar">
-            <Link href="/" className="brand"><span className="brand-mark">S</span><span>SpanTrace</span></Link>
-            <nav className="nav-links" aria-label="Primary navigation">
-              <Link href="/">Runs</Link>
-              <Link href="/repositories">Repository map</Link>
-              <Link href="/settings">Settings</Link>
-            </nav>
-            <div className="topbar-status"><span className="status-dot" />Local workspace</div>
-          </header>
-          <main className="page-shell">{children}</main>
-        </div>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${geistSans.variable} ${geistLanding.variable} ${geistMono.variable} ${instrument.variable}`}>
+        <ThemeProvider><AppShell>{children}</AppShell></ThemeProvider>
       </body>
     </html>
   );

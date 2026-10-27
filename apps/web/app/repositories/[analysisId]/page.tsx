@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { use, useEffect, useMemo, useState } from "react";
+import RelationshipGraph from "../../components/relationship-graph";
 
 type Finding = {
   id: string;
@@ -243,7 +244,7 @@ export default function RepositoryDetail({ params }: { params: Promise<{ analysi
       <div className="filters"><select className="select" value={filterKind} onChange={(event) => setFilterKind(event.target.value)}><option value="">All component types</option>{kindOptions.map((kind) => <option value={kind} key={kind}>{kindLabel[kind] || kind}</option>)}</select><select className="select" value={filterConfidence} onChange={(event) => setFilterConfidence(event.target.value)}><option value="">All certainty levels</option><option value="confirmed_syntax">Confirmed from syntax/configuration</option><option value="strong_candidate">Strong candidate</option><option value="possible">Possible</option><option value="unknown">Unknown</option></select></div>
       <div className="architecture-layout">
         <div className="architecture-canvas">
-          <div className="architecture-columns"><div><div className="map-column-label">Entry points</div>{visibleFindings.filter((finding) => finding.kind === "workflow_entry").map((finding) => <MapNode finding={finding} selected={selected?.finding_id === finding.finding_id} onClick={() => setSelectedId(finding.finding_id)} key={finding.finding_id} />)}</div><div><div className="map-column-label">Agents & workflow</div>{visibleFindings.filter((finding) => ["agent", "workflow_graph"].includes(finding.kind)).map((finding) => <MapNode finding={finding} selected={selected?.finding_id === finding.finding_id} onClick={() => setSelectedId(finding.finding_id)} key={finding.finding_id} />)}</div><div><div className="map-column-label">Tools, models & boundaries</div>{visibleFindings.filter((finding) => ["tool", "model_call", "external_service"].includes(finding.kind)).map((finding) => <MapNode finding={finding} selected={selected?.finding_id === finding.finding_id} onClick={() => setSelectedId(finding.finding_id)} key={finding.finding_id} />)}</div></div>
+           <RelationshipGraph findings={visibleFindings} relationships={analysis.relationships} selectedId={selected?.finding_id} onSelect={setSelectedId} kindLabel={kindLabel} />
           <div className="relationship-list"><div className="map-column-label">Supported relationships</div>{analysis.relationships.length === 0 ? <div className="cell">No source-supported relationship was resolved.</div> : analysis.relationships.map((relationship) => <div className="relationship-row" key={relationship.id}><span className="mono">{analysis.findings.find((finding) => finding.finding_id === relationship.source_finding_id)?.name || relationship.source_finding_id}</span><strong>{relationship.type.replaceAll("_", " ")}</strong><span className="mono">{analysis.findings.find((finding) => finding.finding_id === relationship.target_finding_id)?.name || relationship.target_name || "unresolved"}</span><span className={`badge badge-${badgeConfidence(relationship.confidence)}`}>{confidenceLabel[relationship.confidence] || relationship.confidence}</span></div>)}</div>
         </div>
         <FindingDetails finding={selected} evidence={evidence} />

@@ -8,6 +8,10 @@ __pycache__/
 htmlcov/
 node_modules/
 .next/
+.next-*/
+dev-server.log
+api-server.log
+api-server-error.log
 dist/
 build/
 *.egg-info/

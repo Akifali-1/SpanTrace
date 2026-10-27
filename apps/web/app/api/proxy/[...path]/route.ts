@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const apiUrl = () => (process.env.SPANTRACE_API_URL || process.env.AGENTSCOPE_API_URL || "http://localhost:8070").replace(/\/$/, "");
+const apiUrl = () => (process.env.SPANTRACE_API_URL || process.env.AGENTSCOPE_API_URL || "http://127.0.0.1:8070").replace(/\/$/, "");
 
 async function forward(request: NextRequest, path: string[]) {
   const key = process.env.SPANTRACE_API_KEY || process.env.AGENTSCOPE_API_KEY;
@@ -13,7 +13,11 @@ async function forward(request: NextRequest, path: string[]) {
   try {
     const response = await fetch(target, { method: request.method, headers, body, cache: "no-store" });
     const text = await response.text();
-    return new NextResponse(text, { status: response.status, headers: { "content-type": response.headers.get("content-type") || "application/json" } });
+    const isJson = (response.headers.get("content-type") || "").includes("application/json");
+    if (!isJson) {
+      return NextResponse.json({ detail: text || `API returned status ${response.status}` }, { status: response.status });
+    }
+    return new NextResponse(text, { status: response.status, headers: { "content-type": "application/json" } });
   } catch {
     return NextResponse.json({ detail: "SpanTrace API is unavailable. Start the API or check SPANTRACE_API_URL." }, { status: 502 });
   }

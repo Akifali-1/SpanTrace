@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
+import { ErrorState, LoadingState, PageHeader } from "../components/ui";
 
 type Analysis = {
   id: string;
@@ -35,6 +36,7 @@ export default function Repositories() {
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   async function load() {
     const response = await fetch(proxy("v1/repositories"), { cache: "no-store" });
@@ -44,8 +46,11 @@ export default function Repositories() {
   }
 
   useEffect(() => {
-    load().catch((reason: Error) => setError(reason.message));
+    load().catch((reason: Error) => setError(reason.message)).finally(() => setLoading(false));
   }, []);
+
+  if (loading) return <LoadingState>Loading repository intelligence…</LoadingState>;
+  if (error && !analyses.length) return <ErrorState title="Repositories unavailable" message={error} />;
 
   async function importUrl(event: FormEvent) {
     event.preventDefault();
@@ -92,13 +97,7 @@ export default function Repositories() {
   }
 
   return <>
-    <div className="hero">
-      <div>
-        <div className="eyebrow">Repository intelligence</div>
-        <h1>See how your agent system is assembled.</h1>
-        <p className="lede">Import a public GitHub repository or a ZIP archive. SpanTrace reads source evidence without executing the project, then builds a reviewable architecture and instrumentation plan.</p>
-      </div>
-    </div>
+     <PageHeader eyebrow="Repository intelligence" title="See how your agent system is assembled." description="Import a public GitHub repository or a ZIP archive. SpanTrace reads source evidence without executing the project, then builds a reviewable architecture and instrumentation plan." />
 
     {error && <div className="error-banner"><strong>Import needs attention</strong><span>{error}</span></div>}
     <div className="import-grid">

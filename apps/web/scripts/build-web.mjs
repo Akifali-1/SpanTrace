@@ -10,6 +10,7 @@ const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const useLinuxCache = process.platform === "linux" && (Boolean(process.env.WSL_DISTRO_NAME) || projectRoot.startsWith("/mnt/"));
 const cacheRoot = resolve(process.env.SPANTRACE_WEB_BUILD_CACHE || join(homedir(), ".cache", "spantrace", "web-build"));
 const buildStateName = ".spantrace-build-state.json";
+const productionDistDir = ".next-build";
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: "inherit", env: process.env });
@@ -73,7 +74,7 @@ async function sourceFingerprint(root) {
 }
 
 async function hasCurrentBuild(root, fingerprint) {
-  const buildDirectory = join(root, ".next");
+  const buildDirectory = join(root, productionDistDir);
   if (!existsSync(join(buildDirectory, "BUILD_ID"))) return false;
   try {
     const state = JSON.parse(await readFile(join(buildDirectory, buildStateName), "utf8"));
@@ -84,7 +85,7 @@ async function hasCurrentBuild(root, fingerprint) {
 }
 
 async function recordBuild(root, fingerprint) {
-  await writeFile(join(root, ".next", buildStateName), JSON.stringify({ fingerprint, recordedAt: new Date().toISOString() }) + "\n");
+  await writeFile(join(root, productionDistDir, buildStateName), JSON.stringify({ fingerprint, recordedAt: new Date().toISOString() }) + "\n");
 }
 
 async function main() {

@@ -1,7 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { Bug } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
+import TraceGraph, { type TraceFlowEdge, type TraceFlowNode } from "../../components/trace-graph";
 
 type Execution = {
   id: string;
@@ -29,15 +32,36 @@ type Execution = {
   pids_limit: number;
 };
 
+type TracePayload = {
+  events: TraceFlowNode[];
+  graph: { nodes: TraceFlowNode[]; edges: TraceFlowEdge[]; summary?: { node_count: number; edge_count: number; unresolved_parent_count: number; unresolved_handoff_count: number; uncertain_relationship_count: number } };
+};
+
 const proxy = (path: string) => `/api/proxy/${path}`;
 const terminal = new Set(["succeeded", "failed", "timed_out", "cancelled", "infrastructure_error"]);
-function badge(status: string) { return status === "succeeded" ? "succeeded" : status === "failed" || status === "timed_out" || status === "infrastructure_error" ? "failed" : status === "cancelled" ? "unknown" : "running"; }
+
+function badge(status: string) {
+  return status === "succeeded" ? "succeeded" : status === "failed" || status === "timed_out" || status === "infrastructure_error" ? "failed" : status === "cancelled" ? "unknown" : "running";
+}
+
+function duration(execution: Execution) {
+  if (!execution.started_at) return "—";
+  const end = execution.completed_at ? Date.parse(execution.completed_at) : Date.now();
+  const start = Date.parse(execution.started_at);
+  if (Number.isNaN(start) || Number.isNaN(end)) return "—";
+  const milliseconds = Math.max(0, end - start);
+  return milliseconds < 1000 ? `${milliseconds}ms` : `${(milliseconds / 1000).toFixed(2)}s`;
+}
 
 export default function ExecutionDetail({ params }: { params: Promise<{ executionId: string }> }) {
   const executionId = decodeURIComponent(use(params).executionId);
   const [execution, setExecution] = useState<Execution | null>(null);
   const [error, setError] = useState("");
   const [cancelMessage, setCancelMessage] = useState("");
+  const [trace, setTrace] = useState<TracePayload | null>(null);
+  const [traceError, setTraceError] = useState("");
+  const [investigationBusy, setInvestigationBusy] = useState(false);
+  const router = useRouter();
 
   useEffect(() => {
     let active = true;
@@ -51,11 +75,23 @@ export default function ExecutionDetail({ params }: { params: Promise<{ executio
           setExecution(data);
           if (!terminal.has(data.status)) timer = setTimeout(load, 1000);
         }
-      } catch (reason) { if (active) setError(reason instanceof Error ? reason.message : "Execution unavailable"); }
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : "Execution unavailable");
+      }
     };
     load();
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [executionId]);
+
+  useEffect(() => {
+    if (!execution?.trace_available) return;
+    let active = true;
+    fetch(proxy(`v1/executions/${encodeURIComponent(executionId)}/trace`), { cache: "no-store" })
+      .then(async (response) => response.ok ? response.json() : Promise.reject(new Error((await response.json()).detail || "Trace unavailable")))
+      .then((data) => { if (active) setTrace(data); })
+      .catch((reason: Error) => { if (active) setTraceError(reason.message); });
+    return () => { active = false; };
+  }, [execution?.trace_available, executionId]);
 
   async function cancel() {
     const response = await fetch(proxy(`v1/executions/${encodeURIComponent(executionId)}/cancel`), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "Cancelled from dashboard" }) });
@@ -65,14 +101,35 @@ export default function ExecutionDetail({ params }: { params: Promise<{ executio
     setCancelMessage("Cancellation requested; waiting for the worker to stop.");
   }
 
+  async function startInvestigation() {
+    setInvestigationBusy(true);
+    setCancelMessage("");
+    try {
+      const response = await fetch(proxy(`v1/executions/${encodeURIComponent(executionId)}/investigations`), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: `${execution?.entry_symbol || "Execution"} debugging investigation` }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Could not start investigation");
+      router.push(`/investigations/${encodeURIComponent(data.investigation.id)}`);
+    } catch (reason) { setCancelMessage(reason instanceof Error ? reason.message : "Could not start investigation"); }
+    finally { setInvestigationBusy(false); }
+  }
+
   if (error) return <div className="error"><strong>Could not load execution</strong>{error}<p><Link href="/repositories">Back to repositories</Link></p></div>;
   if (!execution) return <div className="empty">Loading controlled execution…</div>;
+
   const isActive = !terminal.has(execution.status);
-  return <>
+  const flowNodes = trace?.graph.nodes.map((node) => ({ ...node, ...(trace.events.find((event) => event.event_id === node.event_id) || {}), event_id: node.event_id, label: node.label, event_type: node.event_type, status: node.status })) || [];
+  const summary = trace?.graph.summary;
+
+  return <div className="execution-detail-page">
     <Link href={`/repositories/${encodeURIComponent(execution.analysis_id)}`} className="back">← Back to repository map</Link>
-    <div className="detail-header"><div><div className="eyebrow">Controlled worker execution</div><h1>{execution.entry_symbol}</h1><div className="detail-meta"><span className={`badge badge-${badge(execution.status)}`}>{execution.status.replaceAll("_", " ")}</span><span className="mono">{execution.trace_id}</span><span>{execution.entry_file_path}</span></div></div><div className="hero-actions">{isActive && <button className="button button-secondary" onClick={cancel}>Cancel worker</button>}{execution.trace_available && <Link className="button button-primary" href={`/runs/${encodeURIComponent(execution.trace_id)}`}>Open runtime trace</Link>}</div></div>
-    {cancelMessage && <div className="notice">{cancelMessage}</div>}
-    <div className="grid-4 repository-stats"><div className="stat-card"><div className="stat-label">Status</div><div className="stat-value" style={{ fontSize: 18 }}>{execution.status.replaceAll("_", " ")}</div></div><div className="stat-card"><div className="stat-label">Exit code</div><div className="stat-value">{execution.exit_code ?? "—"}</div></div><div className="stat-card"><div className="stat-label">Timeout</div><div className="stat-value">{execution.timeout_seconds}s</div></div><div className="stat-card"><div className="stat-label">Revision</div><div className="stat-value mono" style={{ fontSize: 12 }}>{execution.source_revision.slice(0, 16)}</div></div></div>
-    <div className="detail-grid"><section className="panel side-card"><h2>Execution settings</h2><div className="side-row"><span className="side-label">Source</span><span className="mono">{execution.entry_file_path}</span></div><div className="side-row"><span className="side-label">Function</span><span>{execution.entry_symbol}</span></div><div className="side-row"><span className="side-label">Resources</span><span>{execution.memory_mb}MB · {execution.cpu_limit} CPU · {execution.pids_limit} PIDs</span></div><div className="side-row"><span className="side-label">Failure</span><span>{execution.failure_category || "—"}</span></div><h3>Validated inputs</h3><pre className="payload">{JSON.stringify(execution.input, null, 2)}</pre></section><section className="panel side-card"><h2>Worker output</h2>{execution.result && Object.keys(execution.result).length > 0 && <pre className="payload">{JSON.stringify(execution.result, null, 2)}</pre>}<h3>Sanitized logs</h3><pre className="source-evidence"><code>{execution.logs || (isActive ? "Waiting for worker output…" : "No worker logs were returned.")}</code></pre></section></div>
-  </>;
+     <div className="detail-header execution-header"><div><div className="eyebrow">Controlled worker execution</div><h1>{execution.entry_symbol}</h1><div className="detail-meta"><span className={`badge badge-${badge(execution.status)}`}>{execution.status.replaceAll("_", " ")}</span><span className="mono">{execution.trace_id}</span><span>{execution.entry_file_path}</span></div></div><div className="hero-actions"><button className="button button-primary" onClick={startInvestigation} disabled={investigationBusy}><Bug size={13} />{investigationBusy ? "Starting…" : "Start investigation"}</button>{isActive && <button className="button button-secondary" onClick={cancel}>Cancel worker</button>}{execution.trace_available && <Link className="button button-secondary" href={`/runs/${encodeURIComponent(execution.trace_id)}`}>Open full trace</Link>}</div></div>
+     {cancelMessage && <div className="notice">{cancelMessage}</div>}
+
+     <div className="execution-summary-strip" aria-label="Execution summary"><div><span>Status</span><strong>{execution.status.replaceAll("_", " ")}</strong></div><div><span>Duration</span><strong>{duration(execution)}</strong></div><div><span>Operations</span><strong>{summary?.node_count ?? "—"}</strong></div><div><span>Errors</span><strong className={execution.failure_category ? "summary-danger" : ""}>{execution.failure_category ? 1 : 0}</strong></div><div><span>Exit code</span><strong>{execution.exit_code ?? "—"}</strong></div></div>
+
+    {execution.trace_available && <section className="panel execution-flow-panel execution-workspace"><div className="workspace-heading"><div><div className="eyebrow">Execution workspace</div><h2>Observed workflow map</h2><p className="card-subtitle">Navigate captured parent spans and explicit handoffs. Details open only when you select an operation.</p></div><span className="workspace-evidence">{summary?.edge_count ?? 0} captured links</span></div>{trace ? <TraceGraph nodes={flowNodes} edges={trace.graph.edges} /> : traceError ? <div className="error-state"><strong>Trace flow unavailable</strong><p>{traceError}</p></div> : <div className="loading-state"><span className="loading-spinner" />Loading captured flow…</div>}</section>}
+    {!execution.trace_available && <section className="panel flow-placeholder execution-no-trace"><strong>Trace not available yet</strong><p>The controlled worker has not returned captured telemetry. Execution status and sanitized output remain available below.</p></section>}
+
+    <div className="execution-secondary-grid"><details className="panel collapsible-panel" open><summary><span><strong>Execution settings</strong><small>Source, resources, validated inputs</small></span><span>Open details</span></summary><div className="collapsible-content"><div className="side-row"><span className="side-label">Source</span><span className="mono">{execution.entry_file_path}</span></div><div className="side-row"><span className="side-label">Function</span><span>{execution.entry_symbol}</span></div><div className="side-row"><span className="side-label">Resources</span><span>{execution.memory_mb}MB · {execution.cpu_limit} CPU · {execution.pids_limit} PIDs</span></div><div className="side-row"><span className="side-label">Failure</span><span>{execution.failure_category || "—"}</span></div><h3>Validated inputs</h3><pre className="payload">{JSON.stringify(execution.input, null, 2)}</pre></div></details><details className="panel collapsible-panel" open><summary><span><strong>Worker output</strong><small>Sanitized result and logs</small></span><span>Open details</span></summary><div className="collapsible-content">{execution.result && Object.keys(execution.result).length > 0 && <pre className="payload">{JSON.stringify(execution.result, null, 2)}</pre>}<h3>Sanitized logs</h3><pre className="payload">{execution.logs || (isActive ? "Waiting for worker output…" : "No worker logs were returned.")}</pre></div></details></div>
+  </div>;
 }

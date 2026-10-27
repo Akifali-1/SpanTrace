@@ -1,7 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { Bug } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
+import TraceGraph, { type TraceFlowNode } from "../../components/trace-graph";
 
 type Event = {
   event_id: string;
@@ -37,7 +40,7 @@ type Incident = {
 
 type Graph = {
   status: string;
-  nodes: { event_id: string; label: string; event_type: string; relationship_confidence?: string }[];
+  nodes: { event_id: string; span_id?: string; parent_span_id?: string; label: string; event_type: string; kind?: string; status: string; occurred_at?: string; relationship_confidence?: string; handoff_to?: string; integration?: string; framework?: string }[];
   edges: { from: string; to?: string | null; type: string; confidence: string; target?: string }[];
   summary: {
     node_count: number;
@@ -68,6 +71,8 @@ export default function RunDetail({ params }: { params: Promise<{ runId: string 
   const [error, setError] = useState("");
   const [caseId, setCaseId] = useState("");
   const [regression, setRegression] = useState("");
+  const [investigationBusy, setInvestigationBusy] = useState(false);
+  const router = useRouter();
   const traceId = decodeURIComponent(use(params).runId);
 
   useEffect(() => {
@@ -100,39 +105,58 @@ export default function RunDetail({ params }: { params: Promise<{ runId: string 
     setRegression(data.passed ? "Passed: corrected booking waits for approval." : "Failed: approval invariant still violated.");
   }
 
-  if (error) return <div className="error"><strong>Could not load trace</strong>{error}<p><Link href="/">Back to runs</Link></p></div>;
+  async function startInvestigation() {
+    setInvestigationBusy(true);
+    setRegression("");
+    try {
+      const response = await fetch(proxy(`v1/runs/${encodeURIComponent(traceId)}/investigations`), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: `${run?.name || "Trace"} debugging investigation` }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Could not start investigation");
+      router.push(`/investigations/${encodeURIComponent(data.investigation.id)}`);
+    } catch (reason) { setRegression(reason instanceof Error ? reason.message : "Could not start investigation"); }
+    finally { setInvestigationBusy(false); }
+  }
+
+  if (error) return <div className="error"><strong>Could not load trace</strong>{error}<p><Link href="/v1">Back to runs</Link></p></div>;
   if (!run) return <div className="empty">Loading trace…</div>;
 
-  return <>
-    <Link href="/" className="back">← Back to runs</Link>
+  const flowNodes: TraceFlowNode[] = run.graph.nodes.map((node) => ({
+    ...node,
+    ...(run.events.find((event) => event.event_id === node.event_id) || {}),
+    event_id: node.event_id,
+    label: node.label,
+    event_type: node.event_type,
+    status: node.status,
+  }));
+
+  return <div className="run-detail-page">
+    <Link href="/v1" className="back">← Back to runs</Link>
     <div className="detail-header">
       <div>
         <div className="eyebrow">Trace detail</div>
         <h1>{run.name}</h1>
         <div className="detail-meta"><span className={`badge badge-${run.status}`}>{run.status}</span><span>{run.event_count} events</span><span>{duration(run.duration_ms)}</span><span className="mono">{run.trace_id}</span></div>
       </div>
-      <button className="button button-secondary" onClick={() => window.open(proxy(`v1/runs/${encodeURIComponent(traceId)}/export`), "_blank")}>Export JSON</button>
+       <div className="hero-actions"><button className="button button-primary" onClick={startInvestigation} disabled={investigationBusy}><Bug size={13} />{investigationBusy ? "Starting…" : "Start investigation"}</button><button className="button button-secondary" onClick={() => window.open(proxy(`v1/runs/${encodeURIComponent(traceId)}/export`), "_blank")}>Export JSON</button></div>
     </div>
 
-    <div className="detail-grid">
-      <div>
-        <section className="panel graph-panel">
+    <section className="panel graph-panel execution-workspace">
           <div className="panel-header" style={{ padding: "0 0 18px", marginBottom: 16 }}>
-            <h2>Reconstructed workflow</h2>
-            <span className={`badge badge-${run.graph.status === "observed" ? "succeeded" : "running"}`}>{run.graph.status.replace("_", " ")}</span>
+             <div><h2>Execution flow</h2><p className="card-subtitle">Observed parent spans and explicit handoffs</p></div>
+             <span className={`badge badge-${run.graph.status === "observed" ? "succeeded" : "running"}`}>{run.graph.status.replace("_", " ")}</span>
           </div>
-          <p className="cell">Only recorded parent IDs and explicit handoffs are connected. Unknown relationships remain unresolved.</p>
-          <div className="graph-summary"><span>{run.graph.summary.node_count} nodes</span><span>{run.graph.summary.edge_count} edges</span><span>{run.graph.summary.uncertain_relationship_count} uncertain</span><span>{run.graph.summary.unresolved_handoff_count} unresolved handoffs</span></div>
-          <div className="graph-list">{run.graph.nodes.map((node) => <div className="graph-node" key={node.event_id}><span className="timeline-dot" /><div><strong>{node.label}</strong><div className="cell">{node.event_type} · {node.event_id.slice(0, 10)}…</div></div><span className={`badge badge-${node.relationship_confidence === "unknown" ? "running" : "succeeded"}`}>{node.relationship_confidence || "observed"}</span></div>)}</div>
-          {run.graph.edges.some((edge) => edge.to == null) && <div className="notice">Some handoffs could not be linked to a target span. The timeline below is the chronological fallback.</div>}
-        </section>
-
+            <p className="flow-description">The flow is conservative: it connects only relationships captured in telemetry. Unknown relationships remain visible as incomplete evidence.</p>
+            <div className="graph-summary"><span>{run.graph.summary.node_count} nodes</span><span>{run.graph.summary.edge_count} edges</span><span>{run.graph.summary.uncertain_relationship_count} uncertain</span><span>{run.graph.summary.unresolved_handoff_count} unresolved handoffs</span></div>
+             <TraceGraph nodes={flowNodes} edges={run.graph.edges} />
+           {run.graph.edges.some((edge) => edge.to == null) && <div className="notice">Some handoffs could not be linked to a target span. The timeline below is the chronological fallback.</div>}
+    </section>
+    <div className="run-support-grid">
+      <div>
         <section className="panel timeline">
           <div className="panel-header" style={{ padding: "0 0 18px", marginBottom: 22 }}><h2>Execution timeline</h2><span className="cell">Actual captured events</span></div>
           {run.events.map((event) => <TimelineEvent event={event} key={event.event_id} />)}
         </section>
       </div>
-
       <aside>
         {run.incidents.map((incident, index) => <IncidentCard incident={incident} key={`${incident.title}-${index}`} />)}
         {run.incidents.length === 0 && <div className="panel side-card"><h3>No policy incidents</h3><p>The deterministic approval rule found no violation in this trace.</p></div>}
@@ -140,8 +164,9 @@ export default function RunDetail({ params }: { params: Promise<{ runId: string 
         <div className="panel side-card"><h3>Trace identity</h3><div className="side-row"><span className="side-label">Trace ID</span><span className="mono">{run.trace_id.slice(0, 12)}…</span></div><div className="side-row"><span className="side-label">Events</span><span>{run.event_count}</span></div><div className="side-row"><span className="side-label">Integrations</span><span>{Array.from(new Set(run.events.map((event) => event.integration || "manual"))).join(", ")}</span></div></div>
       </aside>
     </div>
-  </>;
+  </div>;
 }
+
 
 function TimelineEvent({ event }: { event: Event }) {
   const payload = event.tool_name ? { args: event.tool_args, result: event.tool_result } : { input: event.input, output: event.output };
