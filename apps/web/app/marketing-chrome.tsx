@@ -1,3 +1,5 @@
+import ThemeToggle from "./components/theme-toggle";
+
 type MarketingPage = "landing" | "how-it-works";
 
 export function MarketingHeader({ current }: { current: MarketingPage }) {
@@ -8,7 +10,8 @@ export function MarketingHeader({ current }: { current: MarketingPage }) {
       <a className="wordmark" href={homeHref} data-span="brand">SPANTRACE<span className="wordmark-slash">/</span></a>
       <span className="header-note">multi-agent observability · incident replay</span>
       <a className={`header-how ${current === "how-it-works" ? "is-active" : ""}`} href="/how-it-works" aria-current={current === "how-it-works" ? "page" : undefined}>How It Works</a>
-      <a className="header-v1" href="/v1">v1 dashboard</a>
+       <ThemeToggle compact />
+       <a className="header-v1" href="/v1">v1 dashboard</a>
     </div>
   );
 }

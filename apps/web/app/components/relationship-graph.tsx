@@ -1,4 +1,7 @@
-import type { CSSProperties } from "react";
+"use client";
+
+import type { CSSProperties, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from "react";
+import { useRef, useState } from "react";
 
 type Finding = {
   finding_id: string;
@@ -21,54 +24,92 @@ const columns = [
   { label: "Agents & workflow", kinds: ["agent", "workflow_graph"] },
   { label: "Tools, models & boundaries", kinds: ["tool", "model_call", "external_service"] },
 ];
+const NODE_WIDTH = 240;
+const COLUMN_GAP = 80;
+const GRAPH_WIDTH = 3 * NODE_WIDTH + 2 * COLUMN_GAP + 64;
+
+export function normalizeIdentifier(value?: string) {
+  return (value || "").trim().toLowerCase().replaceAll("-", "_");
+}
 
 function groupFor(finding: Finding) {
   const index = columns.findIndex((column) => column.kinds.includes(finding.kind));
   return index >= 0 ? index : 2;
 }
 
-export default function RelationshipGraph({
-  findings,
-  relationships,
-  selectedId,
-  onSelect,
-  kindLabel,
-}: {
+function typeClass(kind: string) {
+  return `map-node-${kind}`;
+}
+
+export default function RelationshipGraph({ findings, relationships, selectedId, onSelect, kindLabel }: {
   findings: Finding[];
   relationships: Relationship[];
   selectedId?: string;
   onSelect: (id: string) => void;
   kindLabel: Record<string, string>;
 }) {
-  const groups = columns.map((column, columnIndex) => findings.filter((finding) => groupFor(finding) === columnIndex));
-  const maxRows = Math.max(...groups.map((group) => group.length), 1);
-  const rowHeight = 77;
-  const graphHeight = Math.max(230, maxRows * rowHeight + 38);
-  const positions = new Map<string, { column: number; y: number }>();
-  groups.forEach((group, column) => group.forEach((finding, index) => positions.set(finding.finding_id, { column, y: 36 + index * rowHeight })));
-  const centerX = [16.5, 50, 83.5];
-  const byId = new Map(findings.map((finding) => [finding.finding_id, finding]));
+  const [zoom, setZoom] = useState(.82);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const drag = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const groups = columns.map((column) => findings.filter((finding) => groupFor(finding) === columns.indexOf(column)));
+  const rowHeight = 78;
+  const graphHeight = Math.max(360, Math.max(...groups.map((group) => group.length), 1) * rowHeight + 48);
+  const positions = new Map<string, { column: number; x: number; y: number }>();
+  groups.forEach((group, column) => group.forEach((finding, index) => {
+    const position = { column, x: 32 + column * (NODE_WIDTH + COLUMN_GAP), y: 24 + index * rowHeight };
+    positions.set(finding.finding_id, position);
+    positions.set(normalizeIdentifier(finding.finding_id), position);
+    positions.set(normalizeIdentifier(finding.name), position);
+  }));
 
-  return (
-    <div className="relationship-graph" aria-label="Source-supported architecture graph">
-      <div className="relationship-graph-labels">{columns.map((column) => <span key={column.label}>{column.label}</span>)}</div>
-      <div className="relationship-graph-canvas" style={{ "--graph-height": `${graphHeight}px` } as CSSProperties}>
-        <svg className="relationship-graph-edges" viewBox={`0 0 100 ${graphHeight}`} preserveAspectRatio="none" aria-hidden="true">
-          <defs><marker id="relationship-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 8 4 L 0 8 z" fill="currentColor" /></marker></defs>
+  function resolve(value?: string) {
+    if (!value) return undefined;
+    return positions.get(value) || positions.get(normalizeIdentifier(value));
+  }
+
+  function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setZoom((value) => Math.max(.55, Math.min(1.2, value * (event.deltaY > 0 ? .92 : 1.08))));
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drag.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!drag.current) return;
+    setPan({ x: drag.current.panX + event.clientX - drag.current.x, y: drag.current.panY + event.clientY - drag.current.y });
+  }
+
+  function stopDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (drag.current && event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    drag.current = null;
+  }
+
+  return <div className="relationship-graph" aria-label="Source-supported architecture graph">
+    <div className="relationship-graph-labels">{columns.map((column) => <span key={column.label}>{column.label}</span>)}</div>
+    <div className="relationship-graph-toolbar"><span>Drag to pan · scroll to zoom</span><button type="button" className="button button-secondary" onClick={() => { setZoom(.82); setPan({ x: 0, y: 0 }); }}>Fit</button></div>
+    <div className="relationship-graph-canvas" style={{ "--graph-height": `${Math.max(560, Math.min(720, graphHeight * zoom + 60))}px` } as CSSProperties} onWheel={handleWheel} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={stopDrag} onPointerCancel={stopDrag}>
+      <div className="relationship-graph-stage" style={{ width: GRAPH_WIDTH, height: graphHeight, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
+        <svg className="relationship-graph-edges" width={GRAPH_WIDTH} height={graphHeight} viewBox={`0 0 ${GRAPH_WIDTH} ${graphHeight}`} aria-hidden="true">
+          <defs><marker id="relationship-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 8 4 L 0 8 z" fill="currentColor" /></marker></defs>
           {relationships.map((relationship, index) => {
-            const source = positions.get(relationship.source_finding_id);
-            const target = relationship.target_finding_id ? positions.get(relationship.target_finding_id) : undefined;
+            const source = resolve(relationship.source_finding_id);
+            const target = resolve(relationship.target_finding_id || relationship.target_name);
             if (!source || !target) return null;
-            return <line key={`${relationship.source_finding_id}-${relationship.target_finding_id}-${index}`} x1={centerX[source.column] + 13} y1={source.y} x2={centerX[target.column] - 13} y2={target.y} className={`graph-edge${relationship.confidence === "unknown" ? " graph-edge-uncertain" : ""}`} markerEnd="url(#relationship-arrow)" />;
+            return <line key={`${relationship.source_finding_id}-${relationship.target_finding_id || relationship.target_name}-${index}`} x1={source.x + NODE_WIDTH} y1={source.y + 30} x2={target.x} y2={target.y + 30} className={`graph-edge${relationship.confidence === "unknown" ? " graph-edge-uncertain" : ""}`} markerEnd="url(#relationship-arrow)" />;
           })}
         </svg>
         {groups.map((group, column) => group.map((finding, index) => {
-          const y = 36 + index * rowHeight;
+          const position = positions.get(finding.finding_id);
+          if (!position) return null;
           const selected = selectedId === finding.finding_id;
-          return <button key={finding.finding_id} className={`graph-graph-node map-node-${finding.kind}${selected ? " is-selected" : ""}`} style={{ left: `${column * 34 + 1}%`, top: `${y - 28}px` }} onClick={() => onSelect(finding.finding_id)} aria-pressed={selected}><span className="map-node-kind">{kindLabel[finding.kind] || finding.kind}</span><strong>{finding.name}</strong><small>{finding.file_path}:{finding.start_line}</small></button>;
+          return <button key={finding.finding_id} className={`graph-graph-node map-node ${typeClass(finding.kind)}${selected ? " is-selected" : ""}`} style={{ left: position.x, top: position.y }} onClick={() => onSelect(finding.finding_id)} aria-pressed={selected} title={finding.name}><span className="map-node-kind">{kindLabel[finding.kind] || finding.kind}</span><strong>{finding.name}</strong><small>{finding.file_path}:{finding.start_line}</small></button>;
         }))}
-        {relationships.some((relationship) => relationship.target_finding_id && !byId.has(relationship.target_finding_id)) && <div className="graph-unresolved">Some relationships target a finding outside the active filter.</div>}
       </div>
+      {relationships.some((relationship) => relationship.target_finding_id && !resolve(relationship.target_finding_id)) && <div className="graph-unresolved">Some relationships target a finding outside the active filter.</div>}
     </div>
-  );
+  </div>;
 }

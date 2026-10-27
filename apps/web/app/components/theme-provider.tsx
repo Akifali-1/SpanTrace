@@ -49,6 +49,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setPreference: (next: ThemePreference) => {
       window.localStorage.setItem(STORAGE_KEY, next);
       applyTheme(next);
+      window.dispatchEvent(new Event("spantrace-theme-change"));
       setPreferenceState(next);
     },
   }), [preference]);

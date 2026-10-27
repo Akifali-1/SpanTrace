@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Search, SlidersHorizontal } from "lucide-react";
+import { Copy, Search, SlidersHorizontal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState, ErrorState, LoadingState, PageHeader, StatusBadge } from "../components/ui";
 
@@ -9,6 +9,15 @@ type Run = { trace_id: string; name: string; status: string; duration_ms?: numbe
 const proxy = (path: string) => `/api/proxy/${path}`;
 const formatDuration = (ms?: number) => ms == null ? "—" : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
 const formatDate = (value: string) => new Date(value).toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" });
+const relativeTime = (value: string) => {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  return `${Math.round(hours / 24)} d ago`;
+};
 
 export default function TracesPage() {
   const [runs, setRuns] = useState<Run[]>([]);
@@ -33,8 +42,8 @@ export default function TracesPage() {
     <PageHeader eyebrow="Trace explorer" title="Traces" description="Search captured agent runs, inspect their relationships, and move from a trace to its evidence timeline." />
     <section className="panel trace-explorer-panel">
       <div className="panel-header"><div><h2>Captured traces</h2><p className="card-subtitle">{filtered.length} of {runs.length} traces shown</p></div><span className="status-badge status-neutral"><SlidersHorizontal size={12} /> Project scope</span></div>
-      <div className="filters"><div className="search-field"><Search size={14} /><input className="input" placeholder="Search trace names or IDs" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select className="select" value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="running">Running</option><option value="cancelled">Cancelled</option></select></div>
-      {filtered.length === 0 ? <EmptyState title={runs.length ? "No matching traces" : "No traces captured yet"}>{runs.length ? "Try a different search or status filter." : "Connect an instrumented workflow and run it once to create the first trace."}</EmptyState> : <div className="table-wrap"><table className="data-table trace-table"><thead><tr><th>Trace</th><th>Status</th><th>Duration</th><th>Events</th><th>Started</th><th /></tr></thead><tbody>{filtered.map((run) => <tr key={run.trace_id}><td><Link href={`/runs/${encodeURIComponent(run.trace_id)}`}><span className="trace-name">{run.name}</span><span className="trace-id">{run.trace_id}</span></Link></td><td><StatusBadge status={run.status} /></td><td>{formatDuration(run.duration_ms)}</td><td>{run.event_count}</td><td>{formatDate(run.started_at)}</td><td><Link href={`/runs/${encodeURIComponent(run.trace_id)}`} className="table-arrow" aria-label={`Open ${run.name}`}>›</Link></td></tr>)}</tbody></table></div>}
+       <div className="filters"><div className="search-field"><Search size={14} /><input className="input" placeholder="Search trace names or IDs" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="select-wrap"><select className="select" value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="running">Running</option><option value="cancelled">Cancelled</option></select></div></div>
+       {filtered.length === 0 ? <EmptyState title={runs.length ? "No matching traces" : "No traces captured yet"}>{runs.length ? "Try a different search or status filter." : "Connect an instrumented workflow and run it once to create the first trace."}</EmptyState> : <div className="table-wrap"><table className="data-table trace-table"><thead><tr><th>Trace</th><th>Status</th><th className="numeric">Duration</th><th className="numeric">Events</th><th>Started</th><th /></tr></thead><tbody>{filtered.map((run) => <tr key={run.trace_id} className="clickable-row" tabIndex={0} onClick={() => { window.location.href = `/runs/${encodeURIComponent(run.trace_id)}`; }} onKeyDown={(event) => { if (event.key === "Enter") window.location.href = `/runs/${encodeURIComponent(run.trace_id)}`; }}><td><Link href={`/runs/${encodeURIComponent(run.trace_id)}`}><span className="trace-name">{run.name}</span><span className="trace-id trace-id-copyable">{run.trace_id}<button type="button" className="copy-button" aria-label="Copy trace ID" title="Copy trace ID" onClick={(event) => { event.stopPropagation(); void navigator.clipboard?.writeText(run.trace_id); }}><Copy size={12} /></button></span></Link></td><td><StatusBadge status={run.status} /></td><td className="numeric">{formatDuration(run.duration_ms)}</td><td className="numeric">{run.event_count}</td><td><span>{formatDate(run.started_at)}</span><small className="relative-time">{relativeTime(run.started_at)}</small></td><td><span className="table-arrow" aria-hidden="true">›</span></td></tr>)}</tbody></table></div>}
     </section>
   </>;
 }

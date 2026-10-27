@@ -6,6 +6,7 @@ import { ScrollTrigger } from "gsap/ScrollTrigger";
 import Lenis from "lenis";
 import { useRef, useState } from "react";
 import { MarketingFooter, MarketingHeader } from "./marketing-chrome";
+import { useTheme } from "./components/theme-provider";
 
 gsap.registerPlugin(ScrollTrigger, useGSAP);
 
@@ -272,11 +273,27 @@ export default function LandingPage() {
   const timecode = useRef<HTMLElement>(null);
   const cursor = useRef<HTMLDivElement>(null);
   const cursorLabel = useRef<HTMLSpanElement>(null);
+  const { preference } = useTheme();
 
   useGSAP(() => {
     const el = root.current;
     const timecodeElement = timecode.current;
     if (!el || !timecodeElement) return;
+
+    const styles = getComputedStyle(document.documentElement);
+    const color = (name: string) => styles.getPropertyValue(name).trim();
+    const colors = {
+      bg: color("--landing-bg"),
+      surface1: color("--landing-surface-1"),
+      danger: color("--landing-danger"),
+      dangerTint: color("--landing-danger-tint"),
+      dangerWash: color("--landing-danger-wash"),
+      success: color("--landing-success"),
+      text: color("--landing-text"),
+      modelTop: color("--landing-model-top"),
+      successModel: color("--landing-success"),
+      failureTint: color("--landing-failure-tint"),
+    };
 
     ScrollTrigger.config({ ignoreMobileResize: true });
 
@@ -449,8 +466,8 @@ export default function LandingPage() {
           const faces = all<SVGElement>('.hero-inner [data-slab="booking"] .model-face');
           const label = one<SVGElement>('.hero-inner [data-slab="booking"] .model-label');
           const mark = one<SVGElement>(".hero-inner .model-mark");
-          trace.to(faces, { fill: "#e5472e", stroke: "#e5472e", duration: 0.05, ease: "steps(2)" }, 0.62);
-          if (label) trace.to(label, { fill: "#07080a", duration: 0.02 }, 0.62);
+           trace.to(faces, { fill: colors.danger, stroke: colors.danger, duration: 0.05, ease: "steps(2)" }, 0.62);
+           if (label) trace.to(label, { fill: colors.bg, duration: 0.02 }, 0.62);
           if (mark) trace.fromTo(mark, { opacity: 0 }, { opacity: 1, duration: 0.03, ease: "steps(1)" }, 0.64);
           trace.to(all(".hero-copy"), { y: -22, opacity: 0.55, duration: 0.2 }, 0.8);
         }
@@ -469,7 +486,7 @@ export default function LandingPage() {
             }
           });
           failure
-            .fromTo(failureScene, { backgroundColor: "#0b0c0e" }, { backgroundColor: "#140d0c", duration: 0.06, ease: "steps(3)" }, 0.52)
+             .fromTo(failureScene, { backgroundColor: colors.surface1 }, { backgroundColor: colors.failureTint, duration: 0.06, ease: "steps(3)" }, 0.52)
             .fromTo(all(".scene-failure .failure-tag"), { opacity: 0, x: -14 }, { opacity: 1, x: 0, duration: 0.06, ease: "steps(3)" }, 0.56)
             .fromTo(shake, { x: 0 }, { x: 5, duration: 0.02, ease: "steps(1)" }, 0.52)
             .to(shake, { x: -4, duration: 0.02, ease: "steps(1)" }, 0.54)
@@ -495,7 +512,7 @@ export default function LandingPage() {
           const lines = all(".log-line");
           lines.forEach((line, index) => logs.fromTo(line, { opacity: 0.14 }, { opacity: 1, duration: 0.05 }, 0.02 + index * 0.026));
           logs
-            .fromTo(all(".log-line.is-failure"), { backgroundColor: "rgba(229,71,46,0)" }, { backgroundColor: "rgba(229,71,46,0.12)", duration: 0.05 }, 0.44)
+             .fromTo(all(".log-line.is-failure"), { backgroundColor: "transparent" }, { backgroundColor: colors.dangerTint, duration: 0.05 }, 0.44)
             .fromTo(lines.filter((line) => line.dataset.logLevel === "1"), { x: -22 }, { x: 0, duration: 0.14 }, 0.5)
             .fromTo(all(".log-branch"), { opacity: 0 }, { opacity: 1, duration: 0.1 }, 0.56);
           all(".loop-row").forEach((row, index) => logs.fromTo(row, { opacity: 0.12, y: 14 }, { opacity: 1, y: 0, duration: 0.08 }, 0.66 + index * 0.08));
@@ -507,7 +524,7 @@ export default function LandingPage() {
           reproduce.fromTo(all(".test-card"), { x: 90, opacity: 0.25 }, { x: 0, opacity: 1, duration: 0.22 }, 0);
           all(".test-code .code-line").forEach((line, index) => reproduce.fromTo(line, { opacity: 0, x: -10 }, { opacity: 1, x: 0, duration: 0.06 }, 0.26 + index * 0.09));
           reproduce
-            .fromTo(all(".test-code-accent"), { backgroundColor: "rgba(229,71,46,0)" }, { backgroundColor: "rgba(229,71,46,0.28)", duration: 0.06 }, 0.56)
+             .fromTo(all(".test-code-accent"), { backgroundColor: "transparent" }, { backgroundColor: colors.dangerWash, duration: 0.06 }, 0.56)
             .fromTo(all(".test-details"), { opacity: 0.1 }, { opacity: 1, duration: 0.1 }, 0.66)
             .fromTo(all(".rewind-mark"), { opacity: 0.2 }, { opacity: 1, duration: 0.06 }, 0.76)
             .fromTo(all(".rewind-glyph"), { rotation: 0 }, { rotation: -360, duration: 0.2 }, 0.76);
@@ -525,9 +542,9 @@ export default function LandingPage() {
           const faces = all<SVGElement>('.verify-model [data-slab="booking"] .model-face');
           const label = one<SVGElement>('.verify-model [data-slab="booking"] .model-label');
           const policy = one<SVGElement>('.verify-model [data-slab="policy guard"] .model-face-top');
-          if (policy) verify.fromTo(policy, { fill: "#252824" }, { fill: "#3b413a", duration: 0.06 }, 0.34);
-          verify.fromTo(faces, { fill: "#e5472e", stroke: "#e5472e" }, { fill: "#1b3f32", stroke: "#ece8dd", duration: 0.08, ease: "steps(2)" }, 0.62);
-          if (label) verify.fromTo(label, { fill: "#07080a" }, { fill: "#ece8dd", duration: 0.02 }, 0.62);
+           if (policy) verify.fromTo(policy, { fill: colors.modelTop }, { fill: colors.successModel, duration: 0.06 }, 0.34);
+           verify.fromTo(faces, { fill: colors.danger, stroke: colors.danger }, { fill: colors.success, stroke: colors.text, duration: 0.08, ease: "steps(2)" }, 0.62);
+           if (label) verify.fromTo(label, { fill: colors.bg }, { fill: colors.text, duration: 0.02 }, 0.62);
           verify
             .fromTo(all(".verify-model .model-mark"), { opacity: 1 }, { opacity: 0, duration: 0.04, ease: "steps(1)" }, 0.62)
             .fromTo(all(".verify-model .model-check"), { opacity: 0 }, { opacity: 1, duration: 0.06, ease: "steps(1)" }, 0.66)
@@ -563,10 +580,13 @@ export default function LandingPage() {
         updateTimecode();
 
         let cancelled = false;
-        document.fonts.ready.then(() => { if (!cancelled) ScrollTrigger.refresh(); });
+         const onThemeChange = () => ScrollTrigger.refresh();
+         window.addEventListener("spantrace-theme-change", onThemeChange);
+         document.fonts.ready.then(() => { if (!cancelled) ScrollTrigger.refresh(); });
 
         return () => {
-          cancelled = true;
+           cancelled = true;
+           window.removeEventListener("spantrace-theme-change", onThemeChange);
           el.removeEventListener("click", onAnchorClick);
           ScrollTrigger.removeEventListener("refreshInit", fit);
           fitTargets.forEach((node) => node.style.removeProperty("--fit"));
@@ -580,7 +600,7 @@ export default function LandingPage() {
       cleanupCursor();
       mm.revert();
     };
-  }, { scope: root, dependencies: [] });
+  }, { scope: root, dependencies: [preference], revertOnUpdate: true });
 
   return (
     <div className="landing-page" data-landing="true" data-anim="pending" ref={root} suppressHydrationWarning>

@@ -17,11 +17,9 @@ import {
   PanelLeftOpen,
   Settings2,
   ShieldAlert,
-  Moon,
-  Sun,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useTheme, type ThemePreference } from "./theme-provider";
+import ThemeToggle from "./theme-toggle";
 
 type NavigationItem = {
   href: string;
@@ -45,7 +43,10 @@ const configuration: NavigationItem[] = [
   { href: "/settings", label: "Settings", icon: Settings2 },
 ];
 
-function isCurrent(pathname: string, href: string) {
+function isCurrent(pathname: string, item: NavigationItem) {
+  if (item.label === "Repositories") return pathname === "/repositories";
+  if (item.label === "Instrumentation") return pathname.startsWith("/repositories/");
+  const href = item.href;
   const route = href.split("#")[0];
   if (route === "/traces") return pathname.startsWith("/traces") || pathname.startsWith("/runs/");
   return pathname === route || pathname.startsWith(`${route}/`);
@@ -53,7 +54,7 @@ function isCurrent(pathname: string, href: string) {
 
 function NavLink({ item, pathname, onNavigate }: { item: NavigationItem; pathname: string; onNavigate: () => void }) {
   const Icon = item.icon;
-  const active = isCurrent(pathname, item.href);
+  const active = isCurrent(pathname, item);
   return (
     <Link href={item.href} prefetch={true} className={`sidebar-link${active ? " is-active" : ""}`} aria-current={active ? "page" : undefined} aria-label={item.label} title={item.label} onClick={onNavigate}>
       <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -68,12 +69,9 @@ function Sidebar({ open, collapsed, onClose, onToggle }: { open: boolean; collap
     <aside className={`sidebar${open ? " is-open" : ""}`} aria-label="Primary navigation">
       <div className="sidebar-top">
         <Link href="/" className="brand" onClick={onClose}>
-          <span className="brand-mark" aria-hidden="true"><span /></span>
+          <span className="brand-mark"><img src="/icon.svg" alt="" /></span>
           <span>SpanTrace</span>
         </Link>
-        <button type="button" className="icon-button sidebar-toggle" onClick={onToggle} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed} title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
-          {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
-        </button>
       </div>
 
       <div className="workspace-switcher" role="button" tabIndex={0} aria-label="Current workspace: local development">
@@ -97,51 +95,20 @@ function Sidebar({ open, collapsed, onClose, onToggle }: { open: boolean; collap
   );
 }
 
-function AppearanceControl() {
-  const { preference, setPreference } = useTheme();
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  const isDark = mounted
-    ? (typeof document !== "undefined" && document.documentElement.dataset.theme === "dark") || preference === "dark"
-    : preference !== "light";
-
-  function toggleTheme() {
-    const current = (typeof document !== "undefined" && document.documentElement.dataset.theme) || preference;
-    const next = current === "light" ? "dark" : "light";
-    setPreference(next);
-  }
-
-  return (
-    <button
-      type="button"
-      className="theme-toggle-btn"
-      onClick={toggleTheme}
-      aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-      title={isDark ? "Switch to light mode" : "Switch to dark mode"}
-    >
-      {mounted && !isDark ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
-    </button>
-  );
-}
-
 function TopBar({ onMenu, onSidebarToggle, collapsed }: { onMenu: () => void; onSidebarToggle: () => void; collapsed: boolean }) {
   const pathname = usePathname();
-  const section = pathname === "/v1" ? "Dashboard" : pathname.startsWith("/runs/") ? "Traces" : pathname.split("/")[1]?.replace(/[-_]/g, " ") || "Workspace";
-  const label = section.charAt(0).toUpperCase() + section.slice(1);
+  const label = pathname === "/v1" ? "Overview" : pathname.startsWith("/runs/") ? "Traces" : pathname.startsWith("/repositories/") ? "Instrumentation" : pathname.split("/")[1]?.replace(/[-_]/g, " ") || "Workspace";
+  const currentLabel = label.charAt(0).toUpperCase() + label.slice(1);
   return (
     <header className="topbar">
       <button type="button" className="icon-button mobile-menu" onClick={onMenu} aria-label="Open navigation"><Menu size={19} /></button>
       <button type="button" className="icon-button desktop-sidebar-toggle" onClick={onSidebarToggle} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed} title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
         {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
       </button>
-      <div className="topbar-context"><span>SpanTrace</span><span className="context-divider">/</span><strong>{label}</strong></div>
+      <div className="topbar-context"><span>SpanTrace</span><span className="context-divider">/</span><strong>{currentLabel}</strong></div>
       <div className="topbar-actions">
         <span className="topbar-status"><span className="status-dot" /> Live workspace</span>
-        <AppearanceControl />
+        <ThemeToggle />
         <Link href="/settings" className="topbar-avatar" aria-label="Open settings">L</Link>
       </div>
     </header>

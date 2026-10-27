@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { Upload } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import { ErrorState, LoadingState, PageHeader } from "../components/ui";
+import { EmptyState, ErrorState, LoadingState, PageHeader } from "../components/ui";
 
 type Analysis = {
   id: string;
@@ -37,6 +38,7 @@ export default function Repositories() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const validUrl = /^https?:\/\/github\.com\/[^/]+\/[^/\s]+\/?$/i.test(url.trim());
 
   async function load() {
     const response = await fetch(proxy("v1/repositories"), { cache: "no-store" });
@@ -96,6 +98,17 @@ export default function Repositories() {
     }
   }
 
+  function chooseFile(candidate?: File) {
+    if (!candidate) return;
+    if (!candidate.name.toLowerCase().endsWith(".zip")) {
+      setFile(null);
+      setError("Only .zip archives are supported.");
+      return;
+    }
+    setError("");
+    setFile(candidate);
+  }
+
   return <>
      <PageHeader eyebrow="Repository intelligence" title="See how your agent system is assembled." description="Import a public GitHub repository or a ZIP archive. SpanTrace reads source evidence without executing the project, then builds a reviewable architecture and instrumentation plan." />
 
@@ -109,7 +122,7 @@ export default function Repositories() {
         <input id="github-url" className="input" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://github.com/owner/repository" required />
         <label className="field-label" htmlFor="github-ref">Branch or reference <span>optional</span></label>
         <input id="github-ref" className="input" value={ref} onChange={(event) => setRef(event.target.value)} placeholder="main" />
-        <button className="button button-primary" disabled={busy !== ""}>{busy === "github" ? "Importing and analyzing…" : "Import GitHub repository"}</button>
+         <button className="button button-primary" disabled={busy !== "" || !validUrl}>{busy === "github" ? "Importing and analyzing…" : "Import GitHub repository"}</button>
         <div className="small-note">Private GitHub repositories are not claimed as supported until an authorized least-privilege integration is configured.</div>
       </form>
       <form className="panel import-card" onSubmit={importZip}>
@@ -117,15 +130,16 @@ export default function Repositories() {
         <h2>Upload a ZIP archive</h2>
         <p>Archives are bounded, checked for traversal and symlinks, and extracted into project-isolated storage. No scripts or dependencies run.</p>
         <label className="field-label" htmlFor="repository-zip">ZIP archive</label>
-        <input id="repository-zip" className="input file-input" type="file" accept=".zip,application/zip" onChange={(event) => setFile(event.target.files?.[0] || null)} required />
-        <button className="button button-primary" disabled={busy !== ""}>{busy === "zip" ? "Importing and analyzing…" : "Upload and analyze ZIP"}</button>
+         <input id="repository-zip" className="file-input-hidden" type="file" accept=".zip" onChange={(event) => chooseFile(event.target.files?.[0])} required />
+         <label className="zip-dropzone" htmlFor="repository-zip"><Upload size={22} aria-hidden="true" /><span>{file ? file.name : "Drag a ZIP here or browse"}</span>{file ? <small>{(file.size / 1024 / 1024).toFixed(2)} MB</small> : <small>ZIP archives only</small>}</label>
+         <button className="button button-secondary" disabled={busy !== "" || !file}>{busy === "zip" ? "Importing and analyzing…" : "Upload and analyze ZIP"}</button>
         <div className="small-note">Generated dependencies, build output, caches, virtual environments, and vendored directories are excluded by default.</div>
       </form>
     </div>
 
     <section className="panel repository-list-panel">
       <div className="panel-header"><h2>Imported repositories</h2><span className="cell">Static analyses only</span></div>
-      {analyses.length === 0 ? <div className="empty"><strong>No repository analysis yet</strong>Import a source above to see candidate entry points, agents, tools, and evidence.</div> : analyses.map((analysis) => <Link href={`/repositories/${encodeURIComponent(analysis.id)}`} className="repository-row" key={analysis.id}>
+       {analyses.length === 0 ? <EmptyState title="No repository analysis yet" icon={<Upload size={17} />}><span>Import a source above to see candidate entry points, agents, tools, and evidence.</span></EmptyState> : analyses.map((analysis) => <Link href={`/repositories/${encodeURIComponent(analysis.id)}`} className="repository-row" key={analysis.id}>
         <div><div className="run-name">{analysis.name}</div><div className="run-id">{analysis.source_kind === "github" ? analysis.source_url : `ZIP · ${analysis.source_revision}`}</div></div>
         <span className={`badge badge-${statusClass(analysis.status)}`}>{analysis.status.replaceAll("_", " ")}</span>
         <div className="cell">{analysis.summary.files_analyzed || 0} files · {Object.values(analysis.summary.finding_counts || {}).reduce((sum, count) => sum + count, 0)} findings</div>
