@@ -32,7 +32,7 @@ cd apps/web && npm install
 cd ../..
 ```
 
-The API defaults to SQLite at `./agentscope.db`. For PostgreSQL, set `SPANTRACE_DATABASE_URL` to a SQLAlchemy PostgreSQL URL and run the migration command below. Legacy `AGENTSCOPE_` server variables remain accepted. The compose file provides a Postgres 16 service and an API image for environments with Docker.
+The API defaults to SQLite at `./spantrace.db`. For PostgreSQL, set `SPANTRACE_DATABASE_URL` to a SQLAlchemy PostgreSQL URL and run the migration command below. Legacy `AGENTSCOPE_` server variables remain accepted. The compose file provides a Postgres 16 service and an API image for environments with Docker.
 
 ## Start the API
 
@@ -227,7 +227,7 @@ The current test suite covers nested SDK spans, async context relationships, cal
 The API creates tables automatically for a convenient SQLite first run. The committed Alembic migration is the source of truth for managed environments:
 
 ```bash
-AGENTSCOPE_DATABASE_URL=postgresql+psycopg://... alembic upgrade head
+SPANTRACE_DATABASE_URL=postgresql+psycopg://... alembic upgrade head
 ```
 
 The Dockerfile installs `psycopg` when building the API image. Install `psycopg[binary]` locally if you run the PostgreSQL migration command outside Docker.
