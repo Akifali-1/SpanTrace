@@ -51,6 +51,11 @@
   --type-neutral: #94A3B8;
   --chart-events: #3B82F6;
   --graph-edge: #475069;
+  --font-inter: Inter, system-ui, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, monospace;
+  --font-geist: Arial, system-ui, sans-serif;
+  --font-geist-mono: "SFMono-Regular", Consolas, monospace;
+  --font-instrument: Georgia, serif;
   --font-body: var(--font-inter), Inter, system-ui, sans-serif;
   --font-code: var(--font-mono), "SFMono-Regular", Consolas, monospace;
   --radius: 12px;
