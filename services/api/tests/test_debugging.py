@@ -22,7 +22,7 @@ def auth(project):
     return {"X-API-Key": project["api_key"]}
 
 
-def setup_failed_execution(client, project, monkeypatch):
+def setup_failed_execution(client, project, monkeypatch, *, idempotency_key: str = "debug-original"):
     files = {
         "main.py": "def main(inputs):\n    from pricing import apply_discount\n    result = apply_discount(6500, inputs.get('code', 'SPRING20'))\n    if result['total_cents'] != 5200:\n        raise AssertionError(f\"expected 5200 cents, calculated {result['total_cents']} cents\")\n    return result\n",
         "pricing.py": "def apply_discount(subtotal_cents, discount_code):\n    discount_cents = subtotal_cents * 20 // 100\n    total_cents = subtotal_cents - discount_cents - discount_cents\n    return {'discount_code': discount_code, 'discount_cents': discount_cents, 'total_cents': total_cents}\n",
@@ -35,7 +35,7 @@ def setup_failed_execution(client, project, monkeypatch):
     config = client.post(f"/v1/repositories/{analysis['id']}/config", headers=auth(project), json={"workflow_entry_point_ids": [entry["finding_id"]], "adapter_ids": ["callback"]})
     assert config.status_code == 201, config.text
     monkeypatch.setattr(execution_coordinator, "submit", lambda *_args: None)
-    created = client.post(f"/v1/repositories/{analysis['id']}/executions", headers=auth(project), json={"workflow_entry_point_id": entry["finding_id"], "configuration_id": config.json()["configuration"]["id"], "inputs": {"scenario": "bug", "secret": "do-not-leak"}, "idempotency_key": "debug-original"})
+    created = client.post(f"/v1/repositories/{analysis['id']}/executions", headers=auth(project), json={"workflow_entry_point_id": entry["finding_id"], "configuration_id": config.json()["configuration"]["id"], "inputs": {"scenario": "bug", "secret": "do-not-leak"}, "idempotency_key": idempotency_key})
     assert created.status_code == 202, created.text
     execution_id = created.json()["execution"]["id"]
     with SessionLocal() as db:
@@ -154,3 +154,15 @@ def test_unapproved_patch_cannot_be_verified(client, project, monkeypatch):
     blocked = client.post(f"/v1/investigations/{investigation_id}/verify", headers=auth(project), json={"run_controlled_rerun": True})
     assert blocked.status_code == 409
     assert "approved" in blocked.json()["detail"].lower()
+
+
+def test_patch_cannot_be_approved_through_another_investigation(client, project, monkeypatch):
+    _analysis, first_execution_id, _trace_id = setup_failed_execution(client, project, monkeypatch, idempotency_key="approval-first")
+    first_id = client.post(f"/v1/executions/{first_execution_id}/investigations", headers=auth(project), json={"name": "First investigation"}).json()["investigation"]["id"]
+    monkeypatch.setattr("app.main.run_isolated_unittest", lambda *_args, **_kwargs: {"status": "failed", "exit_code": 1, "logs": "3900 != 5200"})
+    assert client.post(f"/v1/investigations/{first_id}/regression-test", headers=auth(project)).json()["test"]["status"] == "validated"
+    first_patch = client.post(f"/v1/investigations/{first_id}/patch", headers=auth(project)).json()["patch"]
+    _analysis, second_execution_id, _trace_id = setup_failed_execution(client, project, monkeypatch, idempotency_key="approval-second")
+    second_id = client.post(f"/v1/executions/{second_execution_id}/investigations", headers=auth(project), json={"name": "Second investigation"}).json()["investigation"]["id"]
+    cross_scope = client.post(f"/v1/investigations/{second_id}/patches/{first_patch['id']}/decision", headers=auth(project), json={"decision": "approved"})
+    assert cross_scope.status_code == 404
