@@ -51,7 +51,7 @@ from .repository import (
 )
 from .regression import run_booking_regression
 from .schemas import EventBatch, ExecutionCancel, ExecutionCreate, InstrumentationConfigSelection, InvestigationCreate, KeyCreate, PatchDecision, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, ReproductionRequest, RepositoryUrlImport, VerificationRequest, event_dict
-from .security import issue_key, project_for_key, revoke_key
+from .security import hash_api_key, issue_key, project_for_key, revoke_key
 from .serialization import iso, serialize_event, serialize_run
 
 settings = get_settings()
@@ -596,7 +596,7 @@ def propose_patch(investigation_id: str, project: ProjectDep, db: Db) -> dict[st
 
 
 @app.post("/v1/investigations/{investigation_id}/patches/{patch_id}/decision")
-def decide_patch(investigation_id: str, patch_id: str, payload: PatchDecision, project: ProjectDep, db: Db) -> dict[str, Any]:
+def decide_patch(investigation_id: str, patch_id: str, payload: PatchDecision, project: ProjectDep, db: Db, x_api_key: Annotated[str | None, Header()] = None) -> dict[str, Any]:
     investigation = _investigation_for_project(db, project.id, investigation_id)
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found.")
@@ -605,9 +605,17 @@ def decide_patch(investigation_id: str, patch_id: str, payload: PatchDecision, p
         raise HTTPException(status_code=404, detail="Proposed patch not found.")
     if patch.status not in {"pending_review", "approved", "rejected"}:
         raise HTTPException(status_code=409, detail="This patch can no longer be reviewed.")
+    if patch.status == "approved":
+        if payload.decision == "approved":
+            return {"patch": serialize_patch(patch), "applied_to_original_repository": False, "message": "The patch approval was already recorded."}
+        raise HTTPException(status_code=409, detail="The proposed patch is already approved and cannot be rejected.")
     patch.decision = payload.decision
     patch.decided_at = datetime.utcnow()
     patch.status = payload.decision
+    if payload.decision == "approved":
+        key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(x_api_key or ""), ApiKey.project_id == project.id, ApiKey.revoked_at.is_(None)))
+        patch.approved_by = key.prefix if key else "project-api-key"
+        patch.approved_at = datetime.utcnow()
     if payload.decision == "rejected" and investigation.status == "patch_proposed":
         transition_investigation(investigation, "open")
     db.commit()
@@ -626,6 +634,8 @@ def verify_investigation(investigation_id: str, payload: VerificationRequest, pr
         raise HTTPException(status_code=409, detail="A proposed patch and generated regression test are required before verification.")
     if artifact.status != "validated":
         raise HTTPException(status_code=409, detail="The regression test did not validate the original failure; verification cannot proceed.")
+    if patch.status != "approved":
+        raise HTTPException(status_code=409, detail="The proposed patch must be approved before verification.")
     if not original:
         verification = VerificationRun(investigation_id=investigation.id, patch_id=patch.id, regression_test_id=artifact.id, original_trace_id=investigation.original_trace_id, status="inconclusive", original_test_json=artifact.original_result_json or {}, patched_test_json={}, existing_tests_json={}, command_results_json=[], report_json={"reason": "The original trace has no controlled execution to rerun."}, error_message="Controlled rerun is unavailable for a trace-only investigation.")
         db.add(verification)
@@ -634,8 +644,6 @@ def verify_investigation(investigation_id: str, payload: VerificationRequest, pr
         return {"verification": serialize_verification(verification)}
     if not payload.run_controlled_rerun:
         raise HTTPException(status_code=422, detail="A controlled rerun is required to mark a fix verified.")
-    if patch.status == "rejected":
-        raise HTTPException(status_code=409, detail="The proposed patch was rejected and cannot be verified.")
     transition_investigation(investigation, "verifying") if investigation.status in {"patch_proposed", "open", "inconclusive", "blocked"} else None
     verification = VerificationRun(investigation_id=investigation.id, patch_id=patch.id, regression_test_id=artifact.id, original_execution_id=original.id, original_trace_id=investigation.original_trace_id, status="running", started_at=datetime.utcnow(), original_test_json={}, patched_test_json={}, existing_tests_json={}, command_results_json=[], report_json={})
     db.add(verification)

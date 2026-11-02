@@ -379,6 +379,8 @@ class ProposedPatch(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending_review", index=True)
     decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
     investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="patches")
     candidate: Mapped[RootCauseCandidate | None] = orm_relationship()

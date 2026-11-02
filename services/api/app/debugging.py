@@ -510,6 +510,8 @@ def serialize_patch(patch: ProposedPatch) -> dict[str, Any]:
         "status": patch.status,
         "decision": patch.decision,
         "decided_at": patch.decided_at.isoformat() + "Z" if patch.decided_at else None,
+        "approved_by": patch.approved_by,
+        "approved_at": patch.approved_at.isoformat() + "Z" if patch.approved_at else None,
         "created_at": patch.created_at.isoformat() + "Z",
     }
 

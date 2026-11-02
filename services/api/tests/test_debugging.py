@@ -101,7 +101,14 @@ def test_regression_patch_review_and_verified_fix_require_real_steps(client, pro
     patch = proposed.json()["patch"]
     assert "-    total_cents = subtotal_cents - discount_cents - discount_cents" in patch["diff"]
     assert "+    total_cents = subtotal_cents - discount_cents" in patch["diff"]
-    assert client.post(f"/v1/investigations/{investigation_id}/patches/{patch['id']}/decision", headers=auth(project), json={"decision": "approved"}).status_code == 200
+    approved = client.post(f"/v1/investigations/{investigation_id}/patches/{patch['id']}/decision", headers=auth(project), json={"decision": "approved"})
+    assert approved.status_code == 200
+    approved_patch = approved.json()["patch"]
+    assert approved_patch["approved_by"]
+    assert approved_patch["approved_at"]
+    approved_again = client.post(f"/v1/investigations/{investigation_id}/patches/{patch['id']}/decision", headers=auth(project), json={"decision": "approved"})
+    assert approved_again.status_code == 200
+    assert approved_again.json()["patch"]["approved_at"] == approved_patch["approved_at"]
 
     def complete_patched(execution_id, _token, _inputs):
         with SessionLocal() as db:
@@ -132,3 +139,18 @@ def test_unverified_test_cannot_be_marked_verified(client, project, monkeypatch)
     generated = client.post(f"/v1/investigations/{investigation_id}/regression-test", headers=auth(project))
     assert generated.json()["test"]["status"] == "rejected"
     assert client.post(f"/v1/investigations/{investigation_id}/patch", headers=auth(project)).status_code == 409
+
+
+def test_unapproved_patch_cannot_be_verified(client, project, monkeypatch):
+    _analysis, execution_id, _trace_id = setup_failed_execution(client, project, monkeypatch)
+    investigation_id = client.post(f"/v1/executions/{execution_id}/investigations", headers=auth(project), json={"name": "Approval gate"}).json()["investigation"]["id"]
+    results = [
+        {"status": "failed", "exit_code": 1, "failures": ["test_spring_discount_is_applied_once"], "logs": "AssertionError: 3900 != 5200"},
+    ]
+    monkeypatch.setattr("app.main.run_isolated_unittest", lambda *_args, **_kwargs: results.pop(0))
+    assert client.post(f"/v1/investigations/{investigation_id}/regression-test", headers=auth(project)).json()["test"]["status"] == "validated"
+    proposed = client.post(f"/v1/investigations/{investigation_id}/patch", headers=auth(project))
+    assert proposed.status_code == 201
+    blocked = client.post(f"/v1/investigations/{investigation_id}/verify", headers=auth(project), json={"run_controlled_rerun": True})
+    assert blocked.status_code == 409
+    assert "approved" in blocked.json()["detail"].lower()
