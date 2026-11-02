@@ -50,12 +50,16 @@ def upgrade() -> None:
     )
     op.create_index("ix_contract_results_execution_id", "contract_results", ["execution_id"])
     op.create_index("ix_contract_results_contract_record_id", "contract_results", ["contract_record_id"])
-    op.add_column("regression_test_artifacts", sa.Column("contract_record_id", sa.String(36), sa.ForeignKey("contracts.record_id", ondelete="SET NULL"), nullable=True))
+    with op.batch_alter_table("regression_test_artifacts") as batch:
+        batch.add_column(sa.Column("contract_record_id", sa.String(36), nullable=True))
+        batch.create_foreign_key("fk_regression_test_contract_record", "contracts", ["contract_record_id"], ["record_id"], ondelete="SET NULL")
     op.create_index("ix_regression_test_artifacts_contract_record_id", "regression_test_artifacts", ["contract_record_id"])
 
 
 def downgrade() -> None:
     op.drop_index("ix_regression_test_artifacts_contract_record_id", table_name="regression_test_artifacts")
-    op.drop_column("regression_test_artifacts", "contract_record_id")
+    with op.batch_alter_table("regression_test_artifacts") as batch:
+        batch.drop_constraint("fk_regression_test_contract_record", type_="foreignkey")
+        batch.drop_column("contract_record_id")
     op.drop_table("contract_results")
     op.drop_table("contracts")

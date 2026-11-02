@@ -102,6 +102,7 @@ def coordinate_trip(
         validation = validation_agent(request, itinerary, trace, validation_span)
         result = {"itinerary": itinerary, "budget": budget, "validation": validation}
         if not validation["valid"]:
+            trace.record("workflow_output", kind="workflow", status="failed", output=result, metadata={"recorded_final_output": True})
             raise PlanningValidationError(
                 f"itinerary validation failed: actual={validation['actual_total_cents']} budget={request.budget_cents}"
             )

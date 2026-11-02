@@ -23,6 +23,11 @@ def itinerary_agent(
             "accommodation_cents": accommodation["total_cents"],
             "activities_cents": activities["total_cents"],
         }
+        items = [
+            {"name": "transport", "cost": transport["price_cents"]},
+            {"name": "accommodation", "cost": accommodation["total_cents"]},
+            {"name": "activities", "cost": activities["total_cents"]},
+        ]
         result = {
             "destination": request.destination,
             "dates": {"start": request.start_date.isoformat(), "end": request.end_date.isoformat()},
@@ -30,8 +35,10 @@ def itinerary_agent(
             "transport": transport["selected"],
             "accommodation": accommodation["selected"],
             "activities": activities["activities"],
+            "items": items,
             "cost_breakdown_cents": breakdown,
             "reported_total_cents": budget["reported_total_cents"],
+            "total_cost": budget["reported_total_cents"],
             "budget_cents": request.budget_cents,
             "budget_decision": budget["decision"],
         }

@@ -384,6 +384,7 @@ class RegressionTestArtifact(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     investigation_id: Mapped[str] = mapped_column(ForeignKey("debug_investigations.id", ondelete="CASCADE"), index=True)
     candidate_id: Mapped[str | None] = mapped_column(ForeignKey("root_cause_candidates.id", ondelete="SET NULL"), nullable=True)
+    contract_record_id: Mapped[str | None] = mapped_column(ForeignKey("contracts.record_id", ondelete="SET NULL"), nullable=True, index=True)
     source_revision: Mapped[str | None] = mapped_column(String(200), nullable=True)
     file_path: Mapped[str] = mapped_column(String(500))
     code: Mapped[str] = mapped_column(Text)
@@ -400,6 +401,7 @@ class RegressionTestArtifact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
     investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="regression_tests")
     candidate: Mapped[RootCauseCandidate | None] = orm_relationship()
+    contract: Mapped[Contract | None] = orm_relationship()
 
 
 class ProposedPatch(Base):

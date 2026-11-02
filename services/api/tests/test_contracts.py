@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
+from types import SimpleNamespace
 
 import pytest
 
 from app.contracts import ContractValidationError, evaluate_definition, parse_contract_document
+from app.debugging import build_regression_test
+from app.main import execution_coordinator
+from app.models import Contract, ExecutionRun
+from app.db import SessionLocal
 
 
 def auth(project):
@@ -143,3 +148,48 @@ def test_imported_contracts_start_as_draft(client, project):
     contracts = client.get("/v1/contracts", headers=auth(project)).json()["items"]
     assert contracts[0]["id"] == "demo.total"
     assert contracts[0]["status"] == "draft"
+
+
+def test_failed_approved_contract_generates_a_replay_test(client, project, monkeypatch):
+    files = {"workflow.py": "def main(inputs):\n    return {'total': 3, 'expected': 4}\n"}
+    imported = client.post("/v1/repositories/import/zip", headers=auth(project), files={"file": ("workflow.zip", zip_bytes(files), "application/zip")})
+    analysis = imported.json()["analysis"]
+    entry = next(item for item in analysis["findings"] if item["kind"] == "workflow_entry")
+    config = client.post(f"/v1/repositories/{analysis['id']}/config", headers=auth(project), json={"workflow_entry_point_ids": [entry["finding_id"]], "adapter_ids": ["callback"]}).json()["configuration"]
+    monkeypatch.setattr(execution_coordinator, "submit", lambda *_args: None)
+    created = client.post(f"/v1/repositories/{analysis['id']}/executions", headers=auth(project), json={"workflow_entry_point_id": entry["finding_id"], "configuration_id": config["id"], "inputs": {"scenario": "bug"}, "idempotency_key": "contract-generation"})
+    execution_id = created.json()["execution"]["id"]
+    with SessionLocal() as db:
+        execution = db.get(ExecutionRun, execution_id)
+        execution.status = "succeeded"
+        execution.result_json = {"output": {"total": 3, "expected": 4}}
+        db.commit()
+    contract = client.post("/v1/contracts", headers=auth(project), json={"id": "demo.total", "description": "Totals match.", "predicate": "eq", "left": "output.total", "right": "output.expected"})
+    assert contract.status_code == 201, contract.text
+    assert client.post("/v1/contracts/demo.total/approve", headers=auth(project)).status_code == 200
+    investigation = client.post(f"/v1/executions/{execution_id}/investigations", headers=auth(project), json={"name": "Contract failure"}).json()["investigation"]
+    monkeypatch.setattr("app.main.run_isolated_unittest", lambda *_args, **_kwargs: {"status": "failed", "exit_code": 1, "logs": "Contract demo.total did not pass"})
+    generated = client.post(f"/v1/investigations/{investigation['id']}/regression-test", headers=auth(project))
+    assert generated.status_code == 201, generated.text
+    artifact = generated.json()["test"]
+    assert artifact["status"] == "validated"
+    assert artifact["contract_id"] == "demo.total"
+    assert "demo.total" in artifact["code"]
+    detail = client.get(f"/v1/investigations/{investigation['id']}", headers=auth(project)).json()
+    assert detail["contract_results"][0]["status"] == "fail"
+
+
+def test_non_deterministic_execution_blocks_contract_test(temporary_contract_fixture, tmp_path):
+    analysis, execution, contract = temporary_contract_fixture
+    run = SimpleNamespace(events=[SimpleNamespace(event_type="model_call", output_json=None, tool_result=None)])
+    definition = build_regression_test(analysis, execution, "investigation-id", contract=contract, run=run)
+    assert definition is not None
+    assert "LLM response" in definition["blocked_reason"]
+
+
+@pytest.fixture
+def temporary_contract_fixture(tmp_path):
+    analysis = SimpleNamespace(source_path=str(tmp_path), id="analysis", source_revision="revision")
+    execution = ExecutionRun(input_json={"scenario": "bug"}, result_json={"output": {"total": 1}}, entry_file_path="workflow.py", entry_symbol="main")
+    contract = Contract(record_id="record", project_id="project", id="demo.total", version=1, description="Totals match.", status="approved", predicate="eq", arguments_json={"left": "output.total", "right": "output.expected"})
+    return analysis, execution, contract

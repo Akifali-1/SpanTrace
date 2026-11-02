@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime
 import difflib
+import json
+import logging
 import re
 import shutil
 from pathlib import Path, PurePosixPath
@@ -20,7 +22,9 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from .execution import redact_text, redact_value, run_isolated_unittest
+from .contracts import ContractDefinition, definition_from_row
 from .models import (
+    Contract,
     DebugInvestigation,
     ExecutionRun,
     ProposedPatch,
@@ -30,6 +34,9 @@ from .models import (
     Run,
     VerificationRun,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 INVESTIGATION_TERMINAL = {"verified", "failed", "inconclusive", "blocked", "cancelled"}
@@ -298,7 +305,125 @@ def _write_generated_test(root: Path, file_path: str, code: str) -> None:
     target.chmod(0o600)
 
 
-def build_regression_test(analysis: Any, execution: ExecutionRun | None, investigation_id: str) -> dict[str, Any] | None:
+def _determinism_block_reason(execution: ExecutionRun | None, run: Run | None, analysis: Any | None) -> str | None:
+    if not execution:
+        return "The execution has no recorded input to replay."
+    if not execution.input_json:
+        return "The execution has no recorded input to replay."
+    if not analysis or not analysis.source_path:
+        return "The immutable source snapshot is unavailable for replay."
+    for event in list(run.events) if run else []:
+        if event.event_type == "model_call" and event.output_json is None:
+            return "The execution depends on an LLM response that was not recorded."
+        if event.event_type == "tool_call" and event.tool_result is None:
+            return "The execution depends on a tool response that was not recorded."
+    if not execution.result_json:
+        return "The execution has no recorded final output to assert."
+    return None
+
+
+def _generic_regression_code(execution: ExecutionRun, contract: ContractDefinition) -> str:
+    contract_json = json.dumps({"id": contract.id, "predicate": contract.predicate, "arguments": contract.arguments}, sort_keys=True)
+    input_json = json.dumps(execution.input_json or {}, sort_keys=True)
+    entry_file = json.dumps(execution.entry_file_path)
+    entry_symbol = json.dumps(execution.entry_symbol)
+    return f'''from __future__ import annotations
+
+import importlib.util
+import inspect
+import pathlib
+import sys
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+ENTRY_FILE = {entry_file}
+ENTRY_SYMBOL = {entry_symbol}
+INPUTS = {input_json}
+CONTRACT = {contract_json}
+
+
+def _load_entry():
+    sys.path.insert(0, str(ROOT))
+    source = (ROOT / ENTRY_FILE).resolve()
+    source.relative_to(ROOT.resolve())
+    spec = importlib.util.spec_from_file_location("spantrace_contract_entry", source)
+    if spec is None or spec.loader is None:
+        raise ImportError("Could not load the recorded workflow entry point")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    function = getattr(module, ENTRY_SYMBOL)
+    if not callable(function):
+        raise TypeError(f"Recorded workflow entry point is not callable: {{ENTRY_SYMBOL}}")
+    return function
+
+
+def _resolve(output, path):
+    value = output
+    for token in path[len("output."):].replace("[*]", ".[*]").split("."):
+        if token == "[*]":
+            if not isinstance(value, list):
+                raise KeyError(path)
+            value = [item for item in value]
+            continue
+        if isinstance(value, list):
+            value = [item[token] for item in value if isinstance(item, dict) and token in item]
+            if not value:
+                raise KeyError(path)
+        elif isinstance(value, dict) and token in value:
+            value = value[token]
+        else:
+            raise KeyError(path)
+    return value
+
+
+def _contract_passes(output):
+    args = CONTRACT["arguments"]
+    values = {{name: _resolve(output, path) for name, path in args.items() if name != "tolerance"}}
+    if CONTRACT["predicate"] == "eq":
+        return values["left"] == values["right"]
+    if CONTRACT["predicate"] == "lte":
+        return values["left"] <= values["right"]
+    if CONTRACT["predicate"] == "gte":
+        return values["left"] >= values["right"]
+    if CONTRACT["predicate"] == "sum_equals":
+        return abs(sum(values["terms"]) - values["target"]) <= args["tolerance"]
+    if CONTRACT["predicate"] == "difference_equals":
+        return abs(values["minuend"] - values["subtrahend"] - values["target"]) <= args["tolerance"]
+    raise AssertionError(f"Unsupported contract predicate: {{CONTRACT['predicate']}}")
+
+
+class SpanTraceGeneratedRegression(unittest.TestCase):
+    def test_contract_{re.sub(r"[^A-Za-z0-9_]", "_", contract.id)}(self):
+        function = _load_entry()
+        required = [parameter for parameter in inspect.signature(function).parameters.values() if parameter.kind in {{parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD}} and parameter.default is parameter.empty]
+        output = function(INPUTS) if required else function()
+        self.assertTrue(_contract_passes(output), "Contract {contract.id} did not pass against the replayed output")
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+
+
+def build_regression_test(analysis: Any, execution: ExecutionRun | None, investigation_id: str, *, contract: Contract | None = None, run: Run | None = None) -> dict[str, Any] | None:
+    if contract:
+        reason = _determinism_block_reason(execution, run, analysis)
+        if reason:
+            return {"blocked_reason": reason, "contract_id": contract.id}
+        definition = definition_from_row(contract)
+        return {
+            "file_path": f"tests/test_spantrace_contract_{investigation_id[:8]}.py",
+            "code": _generic_regression_code(execution, definition),
+            "description": definition.description,
+            "input_json": redact_value(execution.input_json or {}),
+            "expected_json": {"contract_id": definition.id, "predicate": definition.predicate, "arguments": definition.arguments},
+            "assumptions": ["The recorded workflow input, source entry point, and tool/model responses are deterministic and available in the execution evidence."],
+            "contract_id": contract.id,
+        }
+    if not analysis or not analysis.source_path:
+        return None
+    logger.warning("Deprecated legacy demo invariant lookup used for investigation %s", investigation_id)
     if not analysis or not analysis.source_path:
         return None
     root = Path(analysis.source_path).resolve()
@@ -481,6 +606,7 @@ def serialize_regression_test(artifact: RegressionTestArtifact) -> dict[str, Any
     return {
         "id": artifact.id,
         "candidate_id": artifact.candidate_id,
+        "contract_id": artifact.contract.id if artifact.contract else artifact.contract_record_id,
         "source_revision": artifact.source_revision,
         "file_path": artifact.file_path,
         "code": artifact.code,

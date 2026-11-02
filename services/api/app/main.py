@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from .config import get_settings
 from .contracts import (
     ContractValidationError,
+    approved_contracts_for_execution,
     contract_definition_from_payload,
     contract_results_for_execution,
     create_contract_record,
@@ -652,9 +653,30 @@ def generate_regression_test(investigation_id: str, project: ProjectDep, db: Db)
         return {"test": serialize_regression_test(existing), "reused": True}
     original = _execution_for_project(db, project.id, investigation.original_execution_id) if investigation.original_execution_id else None
     analysis = db.get(RepositoryAnalysis, investigation.analysis_id) if investigation.analysis_id else None
-    definition = build_regression_test(analysis, original, investigation.id)
+    run = _run_for_trace(db, project.id, investigation.original_trace_id)
+    approved = approved_contracts_for_execution(db, original) if original else []
+    contract = None
+    blocked_reason = None
+    if approved and original:
+        outcomes = evaluate_execution_contracts(db, original)
+        db.commit()
+        failed_ids = {item.contract_record_id for item in outcomes if item.status == "fail"}
+        contract = next((item for item in approved if item.record_id in failed_ids), None)
+        if contract is None:
+            inconclusive = next((item.reason for item in outcomes if item.status == "inconclusive" and item.reason), None)
+            blocked_reason = inconclusive or "No approved contract failed for the recorded execution output."
+    definition = build_regression_test(analysis, original, investigation.id, contract=contract, run=run) if contract else (None if approved else build_regression_test(analysis, original, investigation.id))
+    if definition and definition.get("blocked_reason"):
+        blocked_reason = str(definition["blocked_reason"])
     if not definition:
-        artifact = RegressionTestArtifact(investigation_id=investigation.id, source_revision=investigation.source_revision, file_path="unavailable", code="", description="A deterministic regression test could not be generated from the available source contract.", input_json=redact_value(original.input_json if original else {}), expected_json={}, source_evidence_json=[], assumptions_json=["A supported deterministic test template and source snapshot are required."], status="blocked", original_result_json={"status": "blocked", "reason": "Insufficient source evidence."}, patched_result_json={})
+        artifact = RegressionTestArtifact(investigation_id=investigation.id, source_revision=investigation.source_revision, file_path="unavailable", code="", description="A deterministic regression test could not be generated from the available source contract.", input_json=redact_value(original.input_json if original else {}), expected_json={}, source_evidence_json=[], assumptions_json=["A supported deterministic test template and source snapshot are required."], status="blocked", original_result_json={"status": "blocked", "reason": blocked_reason or "Insufficient source evidence."}, patched_result_json={})
+        db.add(artifact)
+        if investigation.status not in {"blocked", "verified", "failed", "cancelled"}:
+            transition_investigation(investigation, "blocked")
+        db.commit()
+        return {"test": serialize_regression_test(artifact)}
+    if blocked_reason:
+        artifact = RegressionTestArtifact(investigation_id=investigation.id, contract_record_id=contract.record_id if contract else None, source_revision=investigation.source_revision, file_path="unavailable", code="", description="A deterministic regression test could not be generated from the approved contract.", input_json=redact_value(original.input_json if original else {}), expected_json={"contract_id": contract.id} if contract else {}, source_evidence_json=[], assumptions_json=[blocked_reason], status="blocked", original_result_json={"status": "blocked", "reason": blocked_reason}, patched_result_json={})
         db.add(artifact)
         if investigation.status not in {"blocked", "verified", "failed", "cancelled"}:
             transition_investigation(investigation, "blocked")
@@ -666,9 +688,9 @@ def generate_regression_test(investigation_id: str, project: ProjectDep, db: Db)
     _write_generated_test(workspace, definition["file_path"], definition["code"])
     result = run_isolated_unittest(settings, workspace, definition["file_path"])
     result_text = str(result).lower()
-    intended_failure = result.get("status") == "failed" and any(str(value).lower() in result_text for value in definition["expected_json"].values())
+    intended_failure = result.get("status") == "failed" if definition.get("contract_id") else result.get("status") == "failed" and any(str(value).lower() in result_text for value in definition["expected_json"].values())
     status_value = "validated" if intended_failure else "rejected" if result.get("status") == "passed" or result.get("status") == "failed" else "blocked"
-    artifact = RegressionTestArtifact(investigation_id=investigation.id, candidate_id=investigation.candidates[0].id if investigation.candidates else None, source_revision=investigation.source_revision, file_path=definition["file_path"], code=definition["code"], description=definition["description"], input_json=definition["input_json"], expected_json=definition["expected_json"], source_evidence_json=[serialize_candidate(investigation.candidates[0])] if investigation.candidates else [], assumptions_json=definition["assumptions"], workspace_path=str(workspace), status=status_value, original_result_json=redact_value(result), patched_result_json={})
+    artifact = RegressionTestArtifact(investigation_id=investigation.id, candidate_id=investigation.candidates[0].id if investigation.candidates else None, contract_record_id=contract.record_id if contract else None, source_revision=investigation.source_revision, file_path=definition["file_path"], code=definition["code"], description=definition["description"], input_json=definition["input_json"], expected_json=definition["expected_json"], source_evidence_json=[serialize_candidate(investigation.candidates[0])] if investigation.candidates else [], assumptions_json=definition["assumptions"], workspace_path=str(workspace), status=status_value, original_result_json=redact_value(result), patched_result_json={})
     db.add(artifact)
     if status_value == "validated":
         transition_investigation(investigation, "test_generated") if investigation.status in {"open", "reproducing", "inconclusive", "blocked"} else None

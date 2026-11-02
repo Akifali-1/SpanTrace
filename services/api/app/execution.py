@@ -23,7 +23,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings
-from .models import ExecutionRun
+from .models import ExecutionRun, Run
 
 
 TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "cancelled", "infrastructure_error"}
@@ -398,6 +398,13 @@ class ExecutionCoordinator:
                 current.completed_at = datetime.utcnow()
                 current.logs_text = redact_text(logs, self.settings.execution_log_bytes)
                 parsed = self._result_from_logs(logs)
+                if not parsed:
+                    trace_run = db2.query(Run).filter(Run.project_id == current.project_id, Run.trace_id == current.trace_id).first()
+                    if trace_run:
+                        for event in sorted(trace_run.events, key=lambda item: item.occurred_at, reverse=True):
+                            if event.output_json is not None:
+                                parsed = {"output": event.output_json}
+                                break
                 current.result_json = redact_value(parsed or {})
                 db2.commit()
             finally:
