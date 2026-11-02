@@ -85,5 +85,6 @@ def process_order(order: dict[str, Any], trace, *, expected_total_cents: int | N
     if expected_total_cents is not None and total_cents != expected_total_cents:
         with trace.span("pricing-regression-check", kind="agent", input={"expected_cents": expected_total_cents, "actual_cents": total_cents}) as check_span:
             check_span.set_output({"passed": False, "expected_cents": expected_total_cents, "actual_cents": total_cents})
+        trace.record("workflow_output", kind="workflow", status="failed", output=summary, metadata={"recorded_final_output": True})
         raise OrderInvariantError(f"expected {expected_total_cents} cents, calculated {total_cents} cents")
     return summary
