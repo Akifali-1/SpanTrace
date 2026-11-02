@@ -14,6 +14,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import get_settings
+from .contracts import (
+    ContractValidationError,
+    contract_definition_from_payload,
+    contract_results_for_execution,
+    create_contract_record,
+    edit_contract_record,
+    evaluate_execution_contracts,
+    serialize_contract,
+    serialize_contract_result,
+    latest_contract,
+    latest_contracts,
+)
 from .db import Base, engine, get_db
 from .db import SessionLocal
 from .execution import ExecutionCoordinator, execution_token, input_fingerprint, serialize_execution, token_hash, redact_value, run_isolated_unittest
@@ -37,7 +49,7 @@ from .debugging import (
 from .graph import build_execution_graph
 from .incident import evaluate_incidents
 from .integrations import diagnostics_for_project
-from .models import ApiKey, DebugInvestigation, ExecutionRun, InstrumentationConfig, Project, ProposedPatch, RegressionCase, RegressionRun, RegressionTestArtifact, ReproductionAttempt, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship, RootCauseCandidate, Run, TraceEvent, VerificationRun
+from .models import ApiKey, Contract, DebugInvestigation, ExecutionRun, InstrumentationConfig, Project, ProposedPatch, RegressionCase, RegressionRun, RegressionTestArtifact, ReproductionAttempt, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship, RootCauseCandidate, Run, TraceEvent, VerificationRun
 from .repository import (
     RepositoryImportError,
     fetch_public_github_archive,
@@ -50,7 +62,7 @@ from .repository import (
     serialize_config,
 )
 from .regression import run_booking_regression
-from .schemas import EventBatch, ExecutionCancel, ExecutionCreate, InstrumentationConfigSelection, InvestigationCreate, KeyCreate, PatchDecision, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, ReproductionRequest, RepositoryUrlImport, VerificationRequest, event_dict
+from .schemas import ContractPayload, EventBatch, ExecutionCancel, ExecutionCreate, InstrumentationConfigSelection, InvestigationCreate, KeyCreate, PatchDecision, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, ReproductionRequest, RepositoryUrlImport, VerificationRequest, event_dict
 from .security import hash_api_key, issue_key, project_for_key, revoke_key
 from .serialization import iso, serialize_event, serialize_run
 
@@ -173,6 +185,79 @@ def get_project(project: ProjectDep, db: Db) -> dict[str, Any]:
         "created_at": iso(project.created_at),
         "keys": [{"id": key.id, "name": key.name, "prefix": key.prefix, "created_at": iso(key.created_at), "revoked_at": iso(key.revoked_at)} for key in keys],
     }
+
+
+def _contract_source_analysis(db: Session, project: Project, analysis_id: str | None) -> str | None:
+    if not analysis_id:
+        return None
+    analysis = db.scalar(select(RepositoryAnalysis).where(RepositoryAnalysis.id == analysis_id, RepositoryAnalysis.project_id == project.id))
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found for this project.")
+    return analysis.id
+
+
+def _contract_definition_or_422(payload: ContractPayload):
+    try:
+        return contract_definition_from_payload(payload)
+    except ContractValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/v1/contracts")
+def list_contracts(project: ProjectDep, db: Db) -> dict[str, Any]:
+    return {"items": [serialize_contract(item) for item in latest_contracts(db, project.id)]}
+
+
+@app.post("/v1/contracts", status_code=201)
+def create_contract(payload: ContractPayload, project: ProjectDep, db: Db) -> dict[str, Any]:
+    definition = _contract_definition_or_422(payload)
+    source_analysis_id = _contract_source_analysis(db, project, payload.analysis_id)
+    try:
+        contract = create_contract_record(db, project.id, definition, source_analysis_id=source_analysis_id)
+    except ContractValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return {"contract": serialize_contract(contract)}
+
+
+@app.put("/v1/contracts/{contract_id}")
+def edit_contract(contract_id: str, payload: ContractPayload, project: ProjectDep, db: Db) -> dict[str, Any]:
+    if payload.id != contract_id:
+        raise HTTPException(status_code=422, detail=f"Contract {contract_id}: payload id does not match the URL.")
+    definition = _contract_definition_or_422(payload)
+    current = latest_contract(db, project.id, contract_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    source_analysis_id = _contract_source_analysis(db, project, payload.analysis_id)
+    contract = edit_contract_record(db, current, definition, source_analysis_id=source_analysis_id)
+    db.commit()
+    return {"contract": serialize_contract(contract), "new_version": contract.version != current.version}
+
+
+@app.get("/v1/contracts/{contract_id}")
+def get_contract(contract_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    contract = latest_contract(db, project.id, contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    return {"contract": serialize_contract(contract)}
+
+
+@app.post("/v1/contracts/{contract_id}/approve")
+def approve_contract(contract_id: str, project: ProjectDep, db: Db, x_api_key: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+    contract = latest_contract(db, project.id, contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    if contract.status == "approved":
+        return {"contract": serialize_contract(contract), "idempotent": True}
+    if contract.status != "draft":
+        raise HTTPException(status_code=409, detail=f"Contract {contract.id}: only draft contracts can be approved.")
+    key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(x_api_key or ""), ApiKey.project_id == project.id, ApiKey.revoked_at.is_(None)))
+    contract.status = "approved"
+    contract.approved_by = key.prefix if key else "project-api-key"
+    contract.approved_at = datetime.utcnow()
+    contract.updated_at = datetime.utcnow()
+    db.commit()
+    return {"contract": serialize_contract(contract), "idempotent": False}
 
 
 @app.post("/v1/project/keys", status_code=201)
@@ -298,6 +383,17 @@ def _run_for_trace(db: Session, project_id: str, trace_id: str) -> Run | None:
     return db.scalar(select(Run).options(selectinload(Run.events)).where(Run.project_id == project_id, Run.trace_id == trace_id))
 
 
+def _serialize_investigation_with_contracts(db: Session, project_id: str, investigation: DebugInvestigation) -> dict[str, Any]:
+    contract_results: list[dict[str, Any]] = []
+    if investigation.original_execution_id:
+        execution = _execution_for_project(db, project_id, investigation.original_execution_id)
+        if execution:
+            evaluate_execution_contracts(db, execution)
+            db.commit()
+            contract_results = [serialize_contract_result(item) for item in contract_results_for_execution(db, execution.id)]
+    return serialize_investigation(investigation, contract_results=contract_results)
+
+
 def _create_debug_execution(db: Session, project: Project, original: ExecutionRun, *, source_override_path: str | None, idempotency_key: str, input_value: dict[str, Any] | None = None, source_revision: str | None = None) -> ExecutionRun:
     raw_token = execution_token()
     execution = ExecutionRun(
@@ -407,10 +503,22 @@ def get_execution(execution_id: str, project: ProjectDep, db: Db) -> dict[str, A
     execution = _execution_for_project(db, project.id, execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found.")
+    evaluate_execution_contracts(db, execution)
+    db.commit()
     result = serialize_execution(execution)
     run = db.scalar(select(Run).where(Run.project_id == project.id, Run.trace_id == execution.trace_id))
     result["trace_available"] = run is not None
     return result
+
+
+@app.get("/v1/executions/{execution_id}/contracts")
+def get_execution_contracts(execution_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    execution = _execution_for_project(db, project.id, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    evaluate_execution_contracts(db, execution)
+    db.commit()
+    return {"items": [serialize_contract_result(item) for item in contract_results_for_execution(db, execution.id)]}
 
 
 def _create_investigation(db: Session, project: Project, payload: InvestigationCreate, *, execution: ExecutionRun | None, run: Run | None) -> DebugInvestigation:
@@ -454,7 +562,8 @@ def create_execution_investigation(execution_id: str, payload: InvestigationCrea
         raise HTTPException(status_code=404, detail="Execution not found.")
     run = _run_for_trace(db, project.id, execution.trace_id)
     investigation = _create_investigation(db, project, payload, execution=execution, run=run)
-    return {"investigation": serialize_investigation(_investigation_for_project(db, project.id, investigation.id) or investigation), "reused": investigation.created_at != investigation.updated_at}
+    refreshed = _investigation_for_project(db, project.id, investigation.id) or investigation
+    return {"investigation": _serialize_investigation_with_contracts(db, project.id, refreshed), "reused": investigation.created_at != investigation.updated_at}
 
 
 @app.post("/v1/runs/{trace_id}/investigations", status_code=201)
@@ -464,13 +573,14 @@ def create_trace_investigation(trace_id: str, payload: InvestigationCreate, proj
         raise HTTPException(status_code=404, detail="Run not found.")
     execution = db.scalar(select(ExecutionRun).where(ExecutionRun.project_id == project.id, ExecutionRun.trace_id == trace_id))
     investigation = _create_investigation(db, project, payload, execution=execution, run=run)
-    return {"investigation": serialize_investigation(_investigation_for_project(db, project.id, investigation.id) or investigation), "reused": False}
+    refreshed = _investigation_for_project(db, project.id, investigation.id) or investigation
+    return {"investigation": _serialize_investigation_with_contracts(db, project.id, refreshed), "reused": False}
 
 
 @app.get("/v1/investigations")
 def list_investigations(project: ProjectDep, db: Db, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
     investigations = db.scalars(select(DebugInvestigation).where(DebugInvestigation.project_id == project.id).order_by(DebugInvestigation.created_at.desc()).limit(limit)).all()
-    return {"items": [serialize_investigation(_investigation_for_project(db, project.id, item.id) or item) for item in investigations]}
+    return {"items": [_serialize_investigation_with_contracts(db, project.id, _investigation_for_project(db, project.id, item.id) or item) for item in investigations]}
 
 
 @app.get("/v1/investigations/{investigation_id}")
@@ -484,7 +594,7 @@ def get_investigation(investigation_id: str, project: ProjectDep, db: Db) -> dic
         _sync_verification(db, investigation, verification)
     db.commit()
     refreshed = _investigation_for_project(db, project.id, investigation_id)
-    return serialize_investigation(refreshed or investigation)
+    return _serialize_investigation_with_contracts(db, project.id, refreshed or investigation)
 
 
 @app.post("/v1/investigations/{investigation_id}/reproduction", status_code=202)

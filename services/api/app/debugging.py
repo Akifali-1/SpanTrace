@@ -538,7 +538,7 @@ def serialize_verification(verification: VerificationRun) -> dict[str, Any]:
     }
 
 
-def serialize_investigation(investigation: DebugInvestigation) -> dict[str, Any]:
+def serialize_investigation(investigation: DebugInvestigation, *, contract_results: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     latest_test = max(investigation.regression_tests, key=lambda item: item.created_at, default=None)
     latest_patch = max(investigation.patches, key=lambda item: item.created_at, default=None)
     latest_verification = max(investigation.verifications, key=lambda item: item.created_at, default=None)
@@ -557,6 +557,7 @@ def serialize_investigation(investigation: DebugInvestigation) -> dict[str, Any]
         "regression_tests": [serialize_regression_test(item) for item in investigation.regression_tests],
         "patches": [serialize_patch(item) for item in investigation.patches],
         "verifications": [serialize_verification(item) for item in investigation.verifications],
+        "contract_results": contract_results or [],
         "latest": {
             "regression_test_id": latest_test.id if latest_test else None,
             "patch_id": latest_patch.id if latest_patch else None,

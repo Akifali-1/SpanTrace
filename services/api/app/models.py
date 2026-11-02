@@ -26,6 +26,7 @@ class Project(Base):
     repository_analyses: Mapped[list["RepositoryAnalysis"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     execution_runs: Mapped[list["ExecutionRun"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     investigations: Mapped[list["DebugInvestigation"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
+    contracts: Mapped[list["Contract"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class ApiKey(Base):
@@ -251,6 +252,46 @@ class ExecutionRun(Base):
     project: Mapped[Project] = orm_relationship(back_populates="execution_runs")
     analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="execution_runs")
     configuration: Mapped[InstrumentationConfig] = orm_relationship(back_populates="execution_runs")
+    contract_results: Mapped[list["ContractResult"]] = orm_relationship(back_populates="execution", cascade="all, delete-orphan")
+
+
+class Contract(Base):
+    __tablename__ = "contracts"
+    __table_args__ = (
+        UniqueConstraint("project_id", "id", "version", name="uq_contract_project_id_version"),
+        Index("ix_contracts_project_status", "project_id", "status"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    id: Mapped[str] = mapped_column(String(200))
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    source_analysis_id: Mapped[str | None] = mapped_column(ForeignKey("repository_analyses.id", ondelete="SET NULL"), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    predicate: Mapped[str] = mapped_column(String(48))
+    arguments_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    project: Mapped[Project] = orm_relationship(back_populates="contracts")
+    results: Mapped[list["ContractResult"]] = orm_relationship(back_populates="contract", cascade="all, delete-orphan")
+
+
+class ContractResult(Base):
+    __tablename__ = "contract_results"
+    __table_args__ = (UniqueConstraint("execution_id", "contract_record_id", name="uq_contract_result_execution_contract"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    execution_id: Mapped[str] = mapped_column(ForeignKey("execution_runs.id", ondelete="CASCADE"), index=True)
+    contract_record_id: Mapped[str] = mapped_column(ForeignKey("contracts.record_id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    execution: Mapped[ExecutionRun] = orm_relationship(back_populates="contract_results")
+    contract: Mapped[Contract] = orm_relationship(back_populates="results")
 
 
 class DebugInvestigation(Base):
