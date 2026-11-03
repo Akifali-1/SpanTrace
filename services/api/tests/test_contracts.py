@@ -124,7 +124,7 @@ def test_contract_api_stores_approvals_and_creates_draft_version(client, project
     assert created.json()["contract"]["status"] == "draft"
     approved = client.post("/v1/contracts/order.total/approve", headers=auth(project))
     assert approved.status_code == 200
-    assert approved.json()["contract"]["approved_by"]
+    assert approved.json()["contract"]["approved_by"] == project["api_key"][:12]
     edited = client.put(
         "/v1/contracts/order.total",
         headers=auth(project),

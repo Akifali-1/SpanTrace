@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import Project, Run, TraceEvent
+from .serialization import iso
 
 
 SUPPORTED_INTEGRATIONS: tuple[dict[str, Any], ...] = (
@@ -53,7 +54,7 @@ def diagnostics_for_project(db: Session, project: Project) -> list[dict[str, Any
                 "state": _state(observed),
                 "events_received": len(observed),
                 "run_count": len({event.run_id for event in observed}),
-                "last_ingestion_at": latest.isoformat() + "Z" if latest else None,
+                "last_ingestion_at": iso(latest),
                 "captured_event_types": sorted({event.event_type for event in observed}),
                 "redaction": "Payloads are redacted before export; input/output capture is separately configurable.",
                 "evidence": "telemetry" if observed else "none",

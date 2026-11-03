@@ -43,7 +43,7 @@ def setup_failed_execution(client, project, monkeypatch, *, idempotency_key: str
         execution.status = "failed"
         execution.failure_category = "workflow_exception"
         execution.logs_text = 'Traceback (most recent call last):\n  File "/workspace/source/main.py", line 5, in main\n    raise AssertionError("expected 5200 cents, calculated 3900 cents")\nAssertionError: expected 5200 cents, calculated 3900 cents\napi_key=super-secret'
-        execution.completed_at = datetime.utcnow()
+        execution.completed_at = datetime.now(timezone.utc)
         db.commit()
     trace_id = created.json()["execution"]["trace_id"]
     now = datetime.now(timezone.utc).isoformat()
@@ -65,7 +65,7 @@ def test_investigation_evidence_reproduction_and_project_scope(client, project, 
             execution = db.get(ExecutionRun, execution_id)
             execution.status = "failed"
             execution.failure_category = "workflow_exception"
-            execution.completed_at = datetime.utcnow()
+            execution.completed_at = datetime.now(timezone.utc)
             execution.logs_text = "AssertionError: expected 5200 cents, calculated 3900 cents"
             db.commit()
     monkeypatch.setattr(execution_coordinator, "submit", repeat_original)
@@ -104,7 +104,7 @@ def test_regression_patch_review_and_verified_fix_require_real_steps(client, pro
     approved = client.post(f"/v1/investigations/{investigation_id}/patches/{patch['id']}/decision", headers=auth(project), json={"decision": "approved"})
     assert approved.status_code == 200
     approved_patch = approved.json()["patch"]
-    assert approved_patch["approved_by"]
+    assert approved_patch["approved_by"] == project["api_key"][:12]
     assert approved_patch["approved_at"]
     approved_again = client.post(f"/v1/investigations/{investigation_id}/patches/{patch['id']}/decision", headers=auth(project), json={"decision": "approved"})
     assert approved_again.status_code == 200
@@ -115,7 +115,7 @@ def test_regression_patch_review_and_verified_fix_require_real_steps(client, pro
             execution = db.get(ExecutionRun, execution_id)
             execution.status = "succeeded"
             execution.exit_code = 0
-            execution.completed_at = datetime.utcnow()
+            execution.completed_at = datetime.now(timezone.utc)
             execution.result_json = {"output": {"total_cents": 5200}}
             db.commit()
 

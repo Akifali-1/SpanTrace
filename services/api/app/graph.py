@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Iterable
 
+from .serialization import iso
+
 
 def _event_node(event: Any) -> dict[str, Any]:
     return {
@@ -14,8 +16,8 @@ def _event_node(event: Any) -> dict[str, Any]:
         "event_type": event.event_type,
         "kind": event.kind,
         "status": event.status,
-        "occurred_at": event.occurred_at.isoformat() + "Z",
-        "ended_at": event.ended_at.isoformat() + "Z" if event.ended_at else None,
+        "occurred_at": iso(event.occurred_at),
+        "ended_at": iso(event.ended_at),
         "duration_ms": event.duration_ms,
         "integration": event.integration,
         "framework": event.framework,

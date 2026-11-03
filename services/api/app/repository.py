@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 from urllib.parse import quote, urlparse
@@ -23,6 +23,7 @@ from .discovery import EXCLUDED_DIRS, AnalysisResult, analyze_repository, config
 from .integrations import SUPPORTED_INTEGRATIONS
 from .models import InstrumentationConfig, Project, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship
 from .schemas import InstrumentationConfigSelection
+from .serialization import iso
 
 
 ALLOWED_ZIP_CONTENT_TYPES = {"", "application/zip", "application/x-zip-compressed", "application/octet-stream"}
@@ -319,8 +320,8 @@ def process_archive(
         analysis.summary_json = result.summary
         analysis.limitations_json = result.limitations
         analysis.status = "partially_analyzed" if result.partially_analyzed else "analysis_complete"
-        analysis.analyzed_at = datetime.utcnow()
-        analysis.updated_at = datetime.utcnow()
+        analysis.analyzed_at = datetime.now(timezone.utc)
+        analysis.updated_at = datetime.now(timezone.utc)
         persist_imported_contracts(db, project.id, analysis.id, contract_definitions)
         _mark_previous_configs_stale(db, project.id)
         db.commit()
@@ -331,7 +332,7 @@ def process_archive(
         if failed:
             failed.status = "failed"
             failed.error_message = str(exc)[:1000]
-            failed.updated_at = datetime.utcnow()
+            failed.updated_at = datetime.now(timezone.utc)
             db.commit()
         shutil.rmtree(root, ignore_errors=True)
         raise RepositoryImportError(str(exc)) from exc
@@ -401,7 +402,7 @@ def serialize_relationship(relationship: RepositoryRelationship) -> dict[str, An
 def serialize_config(config: InstrumentationConfig | None) -> dict[str, Any] | None:
     if config is None:
         return None
-    return {"id": config.id, "analysis_id": config.analysis_id, "version": config.version, "valid": config.valid, "stale": config.stale, "created_at": config.created_at.isoformat() + "Z", "updated_at": config.updated_at.isoformat() + "Z", "config": config.config_json}
+    return {"id": config.id, "analysis_id": config.analysis_id, "version": config.version, "valid": config.valid, "stale": config.stale, "created_at": iso(config.created_at), "updated_at": iso(config.updated_at), "config": config.config_json}
 
 
 def serialize_analysis(analysis: RepositoryAnalysis, *, include_findings: bool = False) -> dict[str, Any]:
@@ -419,9 +420,9 @@ def serialize_analysis(analysis: RepositoryAnalysis, *, include_findings: bool =
         "summary": analysis.summary_json or {},
         "limitations": analysis.limitations_json or [],
         "error_message": analysis.error_message,
-        "created_at": analysis.created_at.isoformat() + "Z",
-        "updated_at": analysis.updated_at.isoformat() + "Z",
-        "analyzed_at": analysis.analyzed_at.isoformat() + "Z" if analysis.analyzed_at else None,
+        "created_at": iso(analysis.created_at),
+        "updated_at": iso(analysis.updated_at),
+        "analyzed_at": iso(analysis.analyzed_at),
     }
     if include_findings:
         result["findings"] = [serialize_finding(finding) for finding in analysis.findings]

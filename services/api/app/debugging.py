@@ -9,7 +9,7 @@ repositories receive an honest blocked result instead of an invented patch.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import difflib
 import json
 import logging
@@ -34,6 +34,7 @@ from .models import (
     Run,
     VerificationRun,
 )
+from .serialization import iso
 
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def transition_investigation(investigation: DebugInvestigation, target: str) -> 
     if target not in INVESTIGATION_TRANSITIONS.get(current, set()):
         raise ValueError(f"Invalid investigation status transition {current} -> {target}")
     investigation.status = target
-    investigation.updated_at = datetime.utcnow()
+    investigation.updated_at = datetime.now(timezone.utc)
 
 
 def _event_error_text(event: Any) -> str:
@@ -575,7 +576,7 @@ def serialize_candidate(candidate: RootCauseCandidate) -> dict[str, Any]:
         "supporting_evidence": redact_value(candidate.supporting_evidence or []),
         "contradictory_evidence": redact_value(candidate.contradictory_evidence or []),
         "next_step": candidate.next_step,
-        "created_at": candidate.created_at.isoformat() + "Z",
+        "created_at": iso(candidate.created_at),
     }
 
 
@@ -596,9 +597,9 @@ def serialize_reproduction(attempt: ReproductionAttempt) -> dict[str, Any]:
         "signature_match": attempt.signature_match,
         "result": redact_value(attempt.result_json or {}),
         "logs": redact_text(attempt.logs_text or "", 64 * 1024),
-        "created_at": attempt.created_at.isoformat() + "Z",
-        "started_at": attempt.started_at.isoformat() + "Z" if attempt.started_at else None,
-        "completed_at": attempt.completed_at.isoformat() + "Z" if attempt.completed_at else None,
+        "created_at": iso(attempt.created_at),
+        "started_at": iso(attempt.started_at),
+        "completed_at": iso(attempt.completed_at),
     }
 
 
@@ -618,8 +619,8 @@ def serialize_regression_test(artifact: RegressionTestArtifact) -> dict[str, Any
         "status": artifact.status,
         "original_result": redact_value(artifact.original_result_json or {}),
         "patched_result": redact_value(artifact.patched_result_json or {}),
-        "created_at": artifact.created_at.isoformat() + "Z",
-        "updated_at": artifact.updated_at.isoformat() + "Z",
+        "created_at": iso(artifact.created_at),
+        "updated_at": iso(artifact.updated_at),
     }
 
 
@@ -635,10 +636,10 @@ def serialize_patch(patch: ProposedPatch) -> dict[str, Any]:
         "evidence": redact_value(patch.evidence_json or []),
         "status": patch.status,
         "decision": patch.decision,
-        "decided_at": patch.decided_at.isoformat() + "Z" if patch.decided_at else None,
+        "decided_at": iso(patch.decided_at),
         "approved_by": patch.approved_by,
-        "approved_at": patch.approved_at.isoformat() + "Z" if patch.approved_at else None,
-        "created_at": patch.created_at.isoformat() + "Z",
+        "approved_at": iso(patch.approved_at),
+        "created_at": iso(patch.created_at),
     }
 
 
@@ -658,9 +659,9 @@ def serialize_verification(verification: VerificationRun) -> dict[str, Any]:
         "commands": redact_value(verification.command_results_json or []),
         "report": redact_value(verification.report_json or {}),
         "error": verification.error_message,
-        "created_at": verification.created_at.isoformat() + "Z",
-        "started_at": verification.started_at.isoformat() + "Z" if verification.started_at else None,
-        "completed_at": verification.completed_at.isoformat() + "Z" if verification.completed_at else None,
+        "created_at": iso(verification.created_at),
+        "started_at": iso(verification.started_at),
+        "completed_at": iso(verification.completed_at),
     }
 
 
@@ -697,6 +698,6 @@ def serialize_investigation(investigation: DebugInvestigation, *, contract_resul
             "patch": bool(investigation.patches),
             "verification": bool(investigation.verifications),
         },
-        "created_at": investigation.created_at.isoformat() + "Z",
-        "updated_at": investigation.updated_at.isoformat() + "Z",
+        "created_at": iso(investigation.created_at),
+        "updated_at": iso(investigation.updated_at),
     }

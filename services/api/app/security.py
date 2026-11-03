@@ -1,6 +1,6 @@
 import hashlib
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -31,5 +31,11 @@ def project_for_key(db: Session, raw_key: str | None) -> Project | None:
     return key.project if key else None
 
 
+def approval_identity(db: Session, project_id: str, raw_key: str | None) -> str:
+    """Return the authenticated actor available to the API approval audit."""
+    key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(raw_key or ""), ApiKey.project_id == project_id, ApiKey.revoked_at.is_(None)))
+    return key.prefix if key else "project-api-key"
+
+
 def revoke_key(key: ApiKey) -> None:
-    key.revoked_at = datetime.utcnow()
+    key.revoked_at = datetime.now(timezone.utc)

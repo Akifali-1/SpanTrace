@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings
 from .models import ExecutionRun, Run
+from .serialization import iso
 
 
 TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "cancelled", "infrastructure_error"}
@@ -183,10 +184,10 @@ def serialize_execution(execution: ExecutionRun, *, include_logs: bool = True) -
         "cpu_limit": execution.cpu_limit,
         "pids_limit": execution.pids_limit,
         "source_override": bool(execution.source_override_path),
-        "created_at": execution.created_at.isoformat() + "Z",
-        "started_at": execution.started_at.isoformat() + "Z" if execution.started_at else None,
-        "completed_at": execution.completed_at.isoformat() + "Z" if execution.completed_at else None,
-        "cancel_requested_at": execution.cancel_requested_at.isoformat() + "Z" if execution.cancel_requested_at else None,
+        "created_at": iso(execution.created_at),
+        "started_at": iso(execution.started_at),
+        "completed_at": iso(execution.completed_at),
+        "cancel_requested_at": iso(execution.cancel_requested_at),
     }
     if include_logs:
         result["logs"] = redact_text(execution.logs_text or "", 256 * 1024)
@@ -214,7 +215,7 @@ class ExecutionCoordinator:
                     self._kill_container(execution.worker_container_id)
                 execution.status = "infrastructure_error"
                 execution.failure_category = "api_restart"
-                execution.completed_at = datetime.utcnow()
+                execution.completed_at = datetime.now(timezone.utc)
                 execution.logs_text = "Execution was interrupted because the control plane restarted before completion. Retry the run."
             db.commit()
         finally:
@@ -234,7 +235,7 @@ class ExecutionCoordinator:
                 return False
             if execution.status != "cancel_requested":
                 transition_status(execution, "cancel_requested")
-            execution.cancel_requested_at = datetime.utcnow()
+            execution.cancel_requested_at = datetime.now(timezone.utc)
             db.commit()
             with self._lock:
                 process_info = self._processes.get(execution_id)
@@ -266,9 +267,9 @@ class ExecutionCoordinator:
                 except ValueError:
                     return
             if target == "running" and execution.started_at is None:
-                execution.started_at = datetime.utcnow()
+                execution.started_at = datetime.now(timezone.utc)
             if target in TERMINAL_STATUSES:
-                execution.completed_at = execution.completed_at or datetime.utcnow()
+                execution.completed_at = execution.completed_at or datetime.now(timezone.utc)
             if failure_category:
                 execution.failure_category = failure_category
             if exit_code is not None:
@@ -359,7 +360,7 @@ class ExecutionCoordinator:
                 self._set_status(execution_id, "cancelled", failure_category="cancelled", exit_code=process.returncode)
                 return
             transition_status(execution, "running")
-            execution.started_at = execution.started_at or datetime.utcnow()
+            execution.started_at = execution.started_at or datetime.now(timezone.utc)
             db.commit()
             output: list[str] = []
             reader = threading.Thread(target=self._drain_output, args=(process, output), daemon=True)
@@ -395,7 +396,7 @@ class ExecutionCoordinator:
                     return
                 current.exit_code = code
                 current.failure_category = category
-                current.completed_at = datetime.utcnow()
+                current.completed_at = datetime.now(timezone.utc)
                 current.logs_text = redact_text(logs, self.settings.execution_log_bytes)
                 parsed = self._result_from_logs(logs)
                 if not parsed:

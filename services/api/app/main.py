@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -64,7 +64,7 @@ from .repository import (
 )
 from .regression import run_booking_regression
 from .schemas import ContractPayload, EventBatch, ExecutionCancel, ExecutionCreate, InstrumentationConfigSelection, InvestigationCreate, KeyCreate, PatchDecision, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, ReproductionRequest, RepositoryUrlImport, VerificationRequest, event_dict
-from .security import hash_api_key, issue_key, project_for_key, revoke_key
+from .security import approval_identity, hash_api_key, issue_key, project_for_key, revoke_key
 from .serialization import iso, serialize_event, serialize_run
 
 settings = get_settings()
@@ -252,11 +252,10 @@ def approve_contract(contract_id: str, project: ProjectDep, db: Db, x_api_key: A
         return {"contract": serialize_contract(contract), "idempotent": True}
     if contract.status != "draft":
         raise HTTPException(status_code=409, detail=f"Contract {contract.id}: only draft contracts can be approved.")
-    key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(x_api_key or ""), ApiKey.project_id == project.id, ApiKey.revoked_at.is_(None)))
     contract.status = "approved"
-    contract.approved_by = key.prefix if key else "project-api-key"
-    contract.approved_at = datetime.utcnow()
-    contract.updated_at = datetime.utcnow()
+    contract.approved_by = approval_identity(db, project.id, x_api_key)
+    contract.approved_at = datetime.now(timezone.utc)
+    contract.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"contract": serialize_contract(contract), "idempotent": False}
 
@@ -440,7 +439,7 @@ def _sync_reproduction(db: Session, attempt: ReproductionAttempt) -> None:
     attempt.reproduction_trace_id = execution.trace_id
     attempt.logs_text = execution.logs_text or ""
     attempt.result_json = {"execution_status": execution.status, "failure_category": execution.failure_category, "result": execution.result_json or {}}
-    attempt.completed_at = datetime.utcnow()
+    attempt.completed_at = datetime.now(timezone.utc)
     if execution.status == "infrastructure_error":
         attempt.status = "blocked"
         attempt.differences_json = [execution.failure_category or "The controlled worker could not start."]
@@ -470,7 +469,7 @@ def _sync_verification(db: Session, investigation: DebugInvestigation, verificat
     if not execution or execution.status not in {"succeeded", "failed", "timed_out", "cancelled", "infrastructure_error"}:
         return
     verification.patched_trace_id = execution.trace_id
-    verification.completed_at = datetime.utcnow()
+    verification.completed_at = datetime.now(timezone.utc)
     tests_passed = verification.patched_test_json.get("status") == "passed" and verification.existing_tests_json.get("status") == "passed"
     workflow_passed = execution.status == "succeeded"
     verification.report_json = {
@@ -626,13 +625,13 @@ def start_reproduction(investigation_id: str, payload: ReproductionRequest, proj
         return {"attempt": serialize_reproduction(attempt)}
     transition_investigation(investigation, "reproducing") if investigation.status in {"open", "inconclusive", "blocked"} else None
     attempt.status = "running"
-    attempt.started_at = datetime.utcnow()
+    attempt.started_at = datetime.now(timezone.utc)
     db.commit()
     try:
         execution = _create_debug_execution(db, project, original, source_override_path=None, idempotency_key=f"debug-reproduction:{attempt.id}", input_value=payload.inputs)
     except Exception as exc:
         attempt.status = "blocked"
-        attempt.completed_at = datetime.utcnow()
+        attempt.completed_at = datetime.now(timezone.utc)
         attempt.result_json = {"error": "The reproduction could not be queued."}
         attempt.differences_json = [str(exc)[:500]]
         db.commit()
@@ -742,12 +741,11 @@ def decide_patch(investigation_id: str, patch_id: str, payload: PatchDecision, p
             return {"patch": serialize_patch(patch), "applied_to_original_repository": False, "message": "The patch approval was already recorded."}
         raise HTTPException(status_code=409, detail="The proposed patch is already approved and cannot be rejected.")
     patch.decision = payload.decision
-    patch.decided_at = datetime.utcnow()
+    patch.decided_at = datetime.now(timezone.utc)
     patch.status = payload.decision
     if payload.decision == "approved":
-        key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(x_api_key or ""), ApiKey.project_id == project.id, ApiKey.revoked_at.is_(None)))
-        patch.approved_by = key.prefix if key else "project-api-key"
-        patch.approved_at = datetime.utcnow()
+        patch.approved_by = approval_identity(db, project.id, x_api_key)
+        patch.approved_at = datetime.now(timezone.utc)
     if payload.decision == "rejected" and investigation.status == "patch_proposed":
         transition_investigation(investigation, "open")
     db.commit()
@@ -777,7 +775,7 @@ def verify_investigation(investigation_id: str, payload: VerificationRequest, pr
     if not payload.run_controlled_rerun:
         raise HTTPException(status_code=422, detail="A controlled rerun is required to mark a fix verified.")
     transition_investigation(investigation, "verifying") if investigation.status in {"patch_proposed", "open", "inconclusive", "blocked"} else None
-    verification = VerificationRun(investigation_id=investigation.id, patch_id=patch.id, regression_test_id=artifact.id, original_execution_id=original.id, original_trace_id=investigation.original_trace_id, status="running", started_at=datetime.utcnow(), original_test_json={}, patched_test_json={}, existing_tests_json={}, command_results_json=[], report_json={})
+    verification = VerificationRun(investigation_id=investigation.id, patch_id=patch.id, regression_test_id=artifact.id, original_execution_id=original.id, original_trace_id=investigation.original_trace_id, status="running", started_at=datetime.now(timezone.utc), original_test_json={}, patched_test_json={}, existing_tests_json={}, command_results_json=[], report_json={})
     db.add(verification)
     db.commit()
     try:
@@ -801,13 +799,13 @@ def verify_investigation(investigation_id: str, payload: VerificationRequest, pr
         if original_test.get("status") != "failed":
             verification.status = "inconclusive"
             verification.error_message = "The regression test no longer fails against the original source; the captured defect was not revalidated."
-            verification.completed_at = datetime.utcnow()
+            verification.completed_at = datetime.now(timezone.utc)
             verification.report_json = {"reason": verification.error_message, "original_test": redact_value(original_test)}
             transition_investigation(investigation, "inconclusive")
         elif patched_test.get("status") != "passed" or existing_status != "passed":
             verification.status = "failed" if patched_test.get("status") != "blocked" and existing_status != "blocked" else "blocked"
             verification.error_message = "The patched regression test or relevant existing tests did not pass."
-            verification.completed_at = datetime.utcnow()
+            verification.completed_at = datetime.now(timezone.utc)
             verification.report_json = {"reason": verification.error_message}
             transition_investigation(investigation, verification.status)
         else:
@@ -819,7 +817,7 @@ def verify_investigation(investigation_id: str, payload: VerificationRequest, pr
     except Exception as exc:
         verification.status = "blocked"
         verification.error_message = str(exc)[:1000]
-        verification.completed_at = datetime.utcnow()
+        verification.completed_at = datetime.now(timezone.utc)
         transition_investigation(investigation, "blocked") if investigation.status == "verifying" else None
         db.commit()
     refreshed = _investigation_for_project(db, project.id, investigation_id)
@@ -1011,11 +1009,11 @@ def reanalyze_repository(analysis_id: str, project: ProjectDep, db: Db) -> dict[
     analysis.summary_json = result.summary
     analysis.limitations_json = result.limitations
     analysis.status = "partially_analyzed" if result.partially_analyzed else "analysis_complete"
-    analysis.analyzed_at = datetime.utcnow()
-    analysis.updated_at = datetime.utcnow()
+    analysis.analyzed_at = datetime.now(timezone.utc)
+    analysis.updated_at = datetime.now(timezone.utc)
     for configuration in analysis.configurations:
         configuration.stale = True
-        configuration.updated_at = datetime.utcnow()
+        configuration.updated_at = datetime.now(timezone.utc)
     db.commit()
     return {"analysis": serialize_analysis(load_analysis(db, project.id, analysis.id) or analysis, include_findings=True), "reused": False}
 

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -20,7 +20,7 @@ class Project(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     name: Mapped[str] = mapped_column(String(160))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     keys: Mapped[list["ApiKey"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     runs: Mapped[list["Run"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
     repository_analyses: Mapped[list["RepositoryAnalysis"]] = orm_relationship(back_populates="project", cascade="all, delete-orphan")
@@ -38,7 +38,7 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     prefix: Mapped[str] = mapped_column(String(16))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     project: Mapped[Project] = orm_relationship(back_populates="keys")
 
 
@@ -51,7 +51,7 @@ class Run(Base):
     trace_id: Mapped[str] = mapped_column(String(128), index=True)
     name: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(32), default="running")
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     event_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -74,7 +74,7 @@ class TraceEvent(Base):
     event_type: Mapped[str] = mapped_column(String(64))
     kind: Mapped[str] = mapped_column(String(64), default="workflow")
     status: Mapped[str] = mapped_column(String(32), default="running")
-    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     input_json: Mapped[Any | None] = mapped_column(JSONType, nullable=True)
@@ -106,7 +106,7 @@ class RegressionCase(Base):
     name: Mapped[str] = mapped_column(String(200))
     scenario: Mapped[dict[str, Any]] = mapped_column(JSONType)
     expected_assertions: Mapped[list[dict[str, Any]]] = mapped_column(JSONType)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
 
 
 class RegressionRun(Base):
@@ -116,7 +116,7 @@ class RegressionRun(Base):
     case_id: Mapped[str] = mapped_column(ForeignKey("regression_cases.id", ondelete="CASCADE"), index=True)
     passed: Mapped[bool] = mapped_column(default=False)
     actual: Mapped[dict[str, Any]] = mapped_column(JSONType)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
 
 
 class RepositoryAnalysis(Base):
@@ -138,8 +138,8 @@ class RepositoryAnalysis(Base):
     summary_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     limitations_json: Mapped[list[str]] = mapped_column(JSONType, default=list)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     project: Mapped[Project] = orm_relationship(back_populates="repository_analyses")
     findings: Mapped[list["RepositoryFinding"]] = orm_relationship(back_populates="analysis", cascade="all, delete-orphan")
@@ -205,8 +205,8 @@ class InstrumentationConfig(Base):
     config_json: Mapped[dict[str, Any]] = mapped_column(JSONType)
     valid: Mapped[bool] = mapped_column(default=True)
     stale: Mapped[bool] = mapped_column(default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     analysis: Mapped[RepositoryAnalysis] = orm_relationship(back_populates="configurations")
     execution_runs: Mapped[list["ExecutionRun"]] = orm_relationship(back_populates="configuration")
 
@@ -245,7 +245,7 @@ class ExecutionRun(Base):
     cpu_limit: Mapped[str] = mapped_column(String(32))
     pids_limit: Mapped[int] = mapped_column(Integer)
     source_override_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -273,8 +273,8 @@ class Contract(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     predicate: Mapped[str] = mapped_column(String(48))
     arguments_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     project: Mapped[Project] = orm_relationship(back_populates="contracts")
     results: Mapped[list["ContractResult"]] = orm_relationship(back_populates="contract", cascade="all, delete-orphan")
 
@@ -289,7 +289,7 @@ class ContractResult(Base):
     status: Mapped[str] = mapped_column(String(32))
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     details_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
-    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     execution: Mapped[ExecutionRun] = orm_relationship(back_populates="contract_results")
     contract: Mapped[Contract] = orm_relationship(back_populates="results")
 
@@ -314,8 +314,8 @@ class DebugInvestigation(Base):
     failure_summary: Mapped[str] = mapped_column(Text, default="")
     evidence_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     missing_evidence_json: Mapped[list[str]] = mapped_column(JSONType, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     project: Mapped[Project] = orm_relationship(back_populates="investigations")
     original_execution: Mapped[ExecutionRun | None] = orm_relationship(foreign_keys=[original_execution_id])
     analysis: Mapped[RepositoryAnalysis | None] = orm_relationship(foreign_keys=[analysis_id])
@@ -345,7 +345,7 @@ class RootCauseCandidate(Base):
     contradictory_evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
     next_step: Mapped[str] = mapped_column(Text, default="")
     evidence_kind: Mapped[str] = mapped_column(String(32), default="inference")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="candidates")
 
 
@@ -369,7 +369,7 @@ class ReproductionAttempt(Base):
     signature_match: Mapped[bool | None] = mapped_column(nullable=True)
     result_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     logs_text: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="reproductions")
@@ -397,8 +397,8 @@ class RegressionTestArtifact(Base):
     status: Mapped[str] = mapped_column(String(32), default="generated", index=True)
     original_result_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     patched_result_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="regression_tests")
     candidate: Mapped[RootCauseCandidate | None] = orm_relationship()
     contract: Mapped[Contract | None] = orm_relationship()
@@ -424,7 +424,7 @@ class ProposedPatch(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="patches")
     candidate: Mapped[RootCauseCandidate | None] = orm_relationship()
     regression_test: Mapped[RegressionTestArtifact | None] = orm_relationship()
@@ -449,7 +449,7 @@ class VerificationRun(Base):
     command_results_json: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
     report_json: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     investigation: Mapped[DebugInvestigation] = orm_relationship(back_populates="verifications")

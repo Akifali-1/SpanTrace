@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import numbers
 from pathlib import Path
@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .models import Contract, ContractResult, ExecutionRun
+from .serialization import iso
 
 
 logger = logging.getLogger(__name__)
@@ -165,11 +166,11 @@ def serialize_contract(contract: Contract) -> dict[str, Any]:
         "description": contract.description,
         "status": contract.status,
         "approved_by": contract.approved_by,
-        "approved_at": contract.approved_at.isoformat() + "Z" if contract.approved_at else None,
+        "approved_at": iso(contract.approved_at),
         "predicate": contract.predicate,
         "arguments": contract.arguments_json or {},
-        "created_at": contract.created_at.isoformat() + "Z",
-        "updated_at": contract.updated_at.isoformat() + "Z",
+        "created_at": iso(contract.created_at),
+        "updated_at": iso(contract.updated_at),
     }
 
 
@@ -182,7 +183,7 @@ def serialize_contract_result(result: ContractResult) -> dict[str, Any]:
         "status": result.status,
         "reason": result.reason,
         "details": result.details_json or {},
-        "evaluated_at": result.evaluated_at.isoformat() + "Z",
+        "evaluated_at": iso(result.evaluated_at),
     }
 
 
@@ -216,7 +217,7 @@ def edit_contract_record(db: Session, current: Contract, definition: ContractDef
     current.arguments_json = definition.arguments
     if source_analysis_id is not None:
         current.source_analysis_id = source_analysis_id
-    current.updated_at = datetime.utcnow()
+    current.updated_at = datetime.now(timezone.utc)
     return current
 
 
@@ -349,7 +350,7 @@ def evaluate_execution_contracts(db: Session, execution: ExecutionRun) -> list[C
             result.status = outcome["status"]
             result.reason = outcome["reason"]
             result.details_json = outcome["details"]
-            result.evaluated_at = datetime.utcnow()
+            result.evaluated_at = datetime.now(timezone.utc)
         results.append(result)
     db.flush()
     return results

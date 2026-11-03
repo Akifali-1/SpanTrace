@@ -1,9 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
 def iso(value: datetime | None) -> str | None:
-    return value.isoformat() + "Z" if value else None
+    if value is None:
+        return None
+    normalized = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return normalized.isoformat().replace("+00:00", "Z")
 
 
 def serialize_event(event: Any) -> dict[str, Any]:

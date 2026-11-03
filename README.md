@@ -222,6 +222,15 @@ When the repository is opened from a Windows-mounted WSL path such as `/mnt/c`, 
 
 The current test suite covers nested SDK spans, async context relationships, callback and OpenTelemetry lifecycle capture, redaction, fail-open/fail-closed network behavior, ingestion idempotency, invalid payloads, project isolation, filters, graph reconstruction, integration diagnostics, incident evidence, regression pass/fail behavior, and demo execution.
 
+### Warning sources and approval identity
+
+The baseline test run surfaced only third-party warnings:
+
+- `pytest-asyncio` emitted its `asyncio_default_fixture_loop_scope` deprecation warning from `pytest_asyncio/plugin.py:207`; the project now sets the loop scope explicitly to `function`.
+- Starlette emitted a `DeprecationWarning` for the `anyio.abc.BlockingPortal` alias from `starlette/testclient.py:40`. This dependency warning is filtered in the project test configuration until the installed Starlette version removes the alias.
+
+SpanTrace's current API-key authentication layer does not expose a human user identity. Approval audit records therefore store the authenticated API-key prefix in `approved_by` for contracts and proposed patches. A future identity-aware auth layer can provide a user identity without changing the approval flow; no separate auth system is created here.
+
 ## Database migrations
 
 The API creates tables automatically for a convenient SQLite first run. The committed Alembic migration is the source of truth for managed environments:
