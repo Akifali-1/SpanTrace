@@ -328,6 +328,7 @@ class ExecutionCoordinator:
                 "--user", "1000:1000", "--read-only", "--cap-drop=ALL",
                 "--security-opt=no-new-privileges", f"--pids-limit={execution.pids_limit}",
                 f"--memory={execution.memory_mb}m", f"--cpus={execution.cpu_limit}",
+                "--network", "none",
                 "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
                 "--mount", f"type=bind,source={source_root},target=/workspace/source,readonly",
                 "--add-host", "host.docker.internal:host-gateway",
