@@ -22,6 +22,7 @@ from .contracts import (
     create_contract_record,
     edit_contract_record,
     evaluate_execution_contracts,
+    label_contract_stability,
     serialize_contract,
     serialize_contract_result,
     latest_contract,
@@ -383,14 +384,52 @@ def _run_for_trace(db: Session, project_id: str, trace_id: str) -> Run | None:
     return db.scalar(select(Run).options(selectinload(Run.events)).where(Run.project_id == project_id, Run.trace_id == trace_id))
 
 
+def _comparison_executions(db: Session, execution: ExecutionRun) -> list[ExecutionRun]:
+    """Return completed runs with the same source, entry point, config, and input."""
+    return db.scalars(
+        select(ExecutionRun)
+        .where(
+            ExecutionRun.project_id == execution.project_id,
+            ExecutionRun.analysis_id == execution.analysis_id,
+            ExecutionRun.configuration_id == execution.configuration_id,
+            ExecutionRun.source_revision == execution.source_revision,
+            ExecutionRun.entry_finding_id == execution.entry_finding_id,
+            ExecutionRun.input_fingerprint == execution.input_fingerprint,
+            ExecutionRun.source_override_path == execution.source_override_path,
+            ExecutionRun.status.in_({"succeeded", "failed", "timed_out", "cancelled", "infrastructure_error"}),
+        )
+        .order_by(ExecutionRun.created_at, ExecutionRun.id)
+    ).all()
+
+
+def _contract_results_with_stability(db: Session, execution: ExecutionRun) -> list[dict[str, Any]]:
+    executions = _comparison_executions(db, execution)
+    for candidate in executions:
+        evaluate_execution_contracts(db, candidate)
+    db.flush()
+    result_rows = {candidate.id: contract_results_for_execution(db, candidate.id) for candidate in executions}
+    statuses_by_contract: dict[str, list[str]] = {}
+    for rows in result_rows.values():
+        for row in rows:
+            statuses_by_contract.setdefault(row.contract_record_id, []).append(row.status)
+    target_rows = result_rows.get(execution.id, [])
+    return [
+        serialize_contract_result(
+            row,
+            stability_label=label_contract_stability(statuses_by_contract.get(row.contract_record_id, [])),
+            stability_run_count=min(5, len(statuses_by_contract.get(row.contract_record_id, []))),
+        )
+        for row in target_rows
+    ]
+
+
 def _serialize_investigation_with_contracts(db: Session, project_id: str, investigation: DebugInvestigation) -> dict[str, Any]:
     contract_results: list[dict[str, Any]] = []
     if investigation.original_execution_id:
         execution = _execution_for_project(db, project_id, investigation.original_execution_id)
         if execution:
-            evaluate_execution_contracts(db, execution)
+            contract_results = _contract_results_with_stability(db, execution)
             db.commit()
-            contract_results = [serialize_contract_result(item) for item in contract_results_for_execution(db, execution.id)]
     return serialize_investigation(investigation, contract_results=contract_results)
 
 
@@ -516,9 +555,9 @@ def get_execution_contracts(execution_id: str, project: ProjectDep, db: Db) -> d
     execution = _execution_for_project(db, project.id, execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found.")
-    evaluate_execution_contracts(db, execution)
+    contract_results = _contract_results_with_stability(db, execution)
     db.commit()
-    return {"items": [serialize_contract_result(item) for item in contract_results_for_execution(db, execution.id)]}
+    return {"items": contract_results}
 
 
 def _create_investigation(db: Session, project: Project, payload: InvestigationCreate, *, execution: ExecutionRun | None, run: Run | None) -> DebugInvestigation:

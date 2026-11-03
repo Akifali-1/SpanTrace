@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.contracts import ContractValidationError, evaluate_definition, parse_contract_document
+from app.contracts import ContractValidationError, evaluate_definition, label_contract_stability, parse_contract_document
 from app.debugging import build_regression_test
 from app.main import execution_coordinator
 from app.models import Contract, ExecutionRun
@@ -112,6 +112,68 @@ contracts:
     non_numeric = evaluate_definition(definition, {"total": 5, "expected": "5"})
     assert missing["status"] == "inconclusive"
     assert non_numeric["status"] == "inconclusive"
+
+
+def test_contract_stability_labels_saved_run_results():
+    saved_results = {
+        "passes": [{"status": "pass"}] * 5,
+        "fails": [{"status": "fail"}] * 5,
+        "changes": [{"status": value} for value in ["pass", "pass", "fail", "pass", "fail"]],
+    }
+    assert label_contract_stability(saved_results["passes"]) == "stable-pass"
+    assert label_contract_stability(saved_results["fails"]) == "stable-fail"
+    assert label_contract_stability(saved_results["changes"]) == "flaky"
+    assert label_contract_stability(saved_results["passes"][:4]) is None
+
+
+def test_contract_api_exposes_stability_for_saved_runs(client, project):
+    contract_id = "saved.total"
+    project_id = project["project"]["id"]
+    with SessionLocal() as db:
+        db.add(Contract(project_id=project_id, id=contract_id, version=1, description="Saved totals match.", status="approved", approved_by=project["api_key"][:12], predicate="eq", arguments_json={"left": "output.total", "right": "output.expected"}))
+        executions = []
+        for index in range(5):
+            execution = ExecutionRun(
+                project_id=project_id,
+                analysis_id="saved-analysis",
+                configuration_id="saved-config",
+                source_revision="saved-revision",
+                archive_fingerprint="saved-fingerprint",
+                entry_finding_id="saved-entry",
+                entry_file_path="workflow.py",
+                entry_symbol="main",
+                trace_id=f"saved-trace-{index}",
+                idempotency_key=f"saved-run-{index}",
+                status="succeeded",
+                input_json={"scenario": "saved"},
+                input_fingerprint="saved-input",
+                execution_token_hash=f"saved-token-{index}",
+                execution_token_prefix="saved-token",
+                result_json={"output": {"total": 5, "expected": 5}},
+                logs_text="",
+                timeout_seconds=30,
+                memory_mb=64,
+                cpu_limit=1.0,
+                pids_limit=16,
+            )
+            db.add(execution)
+            executions.append(execution)
+        db.commit()
+        target_id = executions[-1].id
+
+    response = client.get(f"/v1/executions/{target_id}/contracts", headers=auth(project))
+    assert response.status_code == 200, response.text
+    result = response.json()["items"][0]
+    assert result["status"] == "pass"
+    assert result["stability_label"] == "stable-pass"
+    assert result["stability_run_count"] == 5
+
+    with SessionLocal() as db:
+        execution = db.get(ExecutionRun, executions[0].id)
+        execution.result_json = {"output": {"total": 4, "expected": 5}}
+        db.commit()
+    response = client.get(f"/v1/executions/{target_id}/contracts", headers=auth(project))
+    assert response.json()["items"][0]["stability_label"] == "flaky"
 
 
 def test_contract_api_stores_approvals_and_creates_draft_version(client, project):

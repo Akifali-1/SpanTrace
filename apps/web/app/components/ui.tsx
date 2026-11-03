@@ -59,13 +59,13 @@ export function BentoCard({
 
 export function StatusBadge({ status, label }: { status: string; label?: string }) {
   const normalized = status.toLowerCase();
-  const tone = normalized === "succeeded" || normalized === "completed" || normalized === "analysis_complete" || normalized === "events_received" || normalized === "passed" || normalized === "pass" || normalized === "approved"
+  const tone = normalized === "succeeded" || normalized === "completed" || normalized === "analysis_complete" || normalized === "events_received" || normalized === "passed" || normalized === "pass" || normalized === "approved" || normalized === "stable-pass"
     ? "success"
-    : normalized === "failed" || normalized === "fail" || normalized === "error" || normalized === "critical" || normalized === "high" || normalized === "infrastructure_error" || normalized === "timed_out"
+    : normalized === "failed" || normalized === "fail" || normalized === "error" || normalized === "critical" || normalized === "high" || normalized === "infrastructure_error" || normalized === "timed_out" || normalized === "stable-fail"
       ? "danger"
       : normalized === "running" || normalized === "analyzing" || normalized === "partially_observed" || normalized === "partially_analyzed"
         ? "info"
-        : normalized === "warning" || normalized === "medium" || normalized === "cancelled" || normalized === "inconclusive" || normalized === "blocked"
+        : normalized === "warning" || normalized === "medium" || normalized === "cancelled" || normalized === "inconclusive" || normalized === "blocked" || normalized === "flaky"
           ? "warning"
           : normalized === "queued"
             ? "muted"

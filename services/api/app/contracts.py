@@ -8,7 +8,7 @@ import logging
 import numbers
 from pathlib import Path
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
 import yaml
@@ -29,6 +29,7 @@ PREDICATE_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "sum_equals": ("terms", "target", "tolerance"),
     "difference_equals": ("minuend", "subtrahend", "target", "tolerance"),
 }
+STABILITY_LABELS = {"stable-pass", "stable-fail", "flaky"}
 PATH_RE = re.compile(r"^output\.[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[\*\])*$")
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\[\*\]")
 CONTRACT_FILE = Path(".spantrace") / "contracts.yaml"
@@ -44,6 +45,28 @@ class ContractDefinition:
 
 class ContractValidationError(ValueError):
     """A contract document or record does not meet the supported contract schema."""
+
+
+def label_contract_stability(results: Sequence[dict[str, Any] | str], runs: int = 5) -> str | None:
+    """Label the latest ``runs`` saved pass/fail results for one contract.
+
+    A label is withheld until the requested number of runs is available or when
+    every run is inconclusive. A changing pass/fail/inconclusive sequence is
+    flaky; an unchanged pass or fail sequence is stable.
+    """
+    if runs < 1:
+        raise ValueError("runs must be at least 1")
+    statuses = [item if isinstance(item, str) else str(item.get("status", "inconclusive")) for item in results]
+    if len(statuses) < runs:
+        return None
+    window = statuses[-runs:]
+    if len(set(window)) > 1:
+        return "flaky"
+    if window[0] == "pass":
+        return "stable-pass"
+    if window[0] == "fail":
+        return "stable-fail"
+    return None
 
 
 def _contract_label(contract_id: Any) -> str:
@@ -174,7 +197,7 @@ def serialize_contract(contract: Contract) -> dict[str, Any]:
     }
 
 
-def serialize_contract_result(result: ContractResult) -> dict[str, Any]:
+def serialize_contract_result(result: ContractResult, *, stability_label: str | None = None, stability_run_count: int = 0) -> dict[str, Any]:
     return {
         "id": result.id,
         "contract_id": result.contract.id if result.contract else None,
@@ -184,6 +207,8 @@ def serialize_contract_result(result: ContractResult) -> dict[str, Any]:
         "reason": result.reason,
         "details": result.details_json or {},
         "evaluated_at": iso(result.evaluated_at),
+        "stability_label": stability_label,
+        "stability_run_count": stability_run_count,
     }
 
 
