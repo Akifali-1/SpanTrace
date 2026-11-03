@@ -32,6 +32,7 @@ type Incident = {
 };
 
 type Project = { id: string; name: string; created_at: string };
+type Contract = { id: string; version: number; description: string; predicate: string; status: string; approved_at?: string | null };
 const proxy = (path: string) => `/api/proxy/${path}`;
 
 function formatDuration(ms?: number) {
@@ -51,6 +52,7 @@ function percentile(values: number[], ratio: number) {
 export default function Home() {
   const [project, setProject] = useState<Project | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [contracts, setContracts] = useState<Contract[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -58,11 +60,19 @@ export default function Home() {
     Promise.all([
       fetch(proxy("v1/project")).then(async (response) => response.ok ? response.json() : Promise.reject(new Error((await response.json()).detail || "Could not load project"))),
       fetch(proxy("v1/runs?limit=100")).then(async (response) => response.ok ? response.json() : Promise.reject(new Error((await response.json()).detail || "Could not load traces"))),
+      fetch(proxy("v1/contracts")).then(async (response) => response.ok ? response.json() : Promise.reject(new Error((await response.json()).detail || "Could not load contracts"))),
     ])
-      .then(([projectData, runsData]) => { setProject(projectData); setRuns(runsData.items || []); })
+      .then(([projectData, runsData, contractsData]) => { setProject(projectData); setRuns(runsData.items || []); setContracts(contractsData.items || []); })
       .catch((reason: Error) => setError(reason.message))
       .finally(() => setLoading(false));
   }, []);
+
+  async function approveContract(contractId: string) {
+    const response = await fetch(proxy(`v1/contracts/${encodeURIComponent(contractId)}/approve`), { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Could not approve contract");
+    setContracts((current) => current.map((contract) => contract.id === contractId ? data.contract : contract));
+  }
 
   const stats = useMemo(() => {
     const successful = runs.filter((run) => run.status === "succeeded" || run.status === "completed").length;
@@ -142,5 +152,7 @@ export default function Home() {
         {stats.incidents.length === 0 ? <EmptyState title="No incidents detected" icon={<Search size={17} />}><span>Evidence-backed policy findings will appear here when a trace identifies one.</span></EmptyState> : <div className="incident-list">{stats.incidents.slice(0, 5).map((incident, index) => <Link href={`/runs/${encodeURIComponent(incident.trace_id)}`} className="incident-row" key={`${incident.trace_id}-${incident.title}-${index}`}><span className={`incident-marker${incident.severity === "medium" || incident.severity === "low" ? " warning" : ""}`} /><span><h3>{incident.title}</h3><p>{incident.run_name} · {incident.summary}</p></span><StatusBadge status={incident.severity} label={incident.severity} /><span className="incident-time">{formatDate(incident.started_at)}</span></Link>)}</div>}
       </BentoCard>
     </div>
+
+    <section className="panel contract-panel"><div className="panel-header"><div><h2>Developer contracts</h2><p className="card-subtitle">Approved correctness rules are evaluated against controlled execution output.</p></div><Link href="/repositories" className="text-link">Manage source contracts <ArrowUpRight size={13} /></Link></div>{contracts.length === 0 ? <EmptyState title="No contracts defined"><span>Import a repository with <span className="mono">.spantrace/contracts.yaml</span> or create a contract through the API.</span></EmptyState> : <div className="table-wrap"><table className="data-table"><thead><tr><th>Contract</th><th>Predicate</th><th>Version</th><th>Status</th><th /></tr></thead><tbody>{contracts.map((contract) => <tr key={contract.id}><td><strong>{contract.id}</strong><div className="cell">{contract.description}</div></td><td className="mono">{contract.predicate}</td><td>v{contract.version}</td><td><StatusBadge status={contract.status} /></td><td>{contract.status === "draft" && <button className="button button-secondary" onClick={() => { approveContract(contract.id).catch((reason: Error) => setError(reason.message)); }}>Approve</button>}</td></tr>)}</tbody></table></div>}</section>
   </>;
 }

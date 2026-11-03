@@ -1,0 +1,13 @@
+contracts:
+  - id: travel.total_matches_line_items
+    description: The itinerary total must equal the sum of line item costs.
+    predicate: sum_equals
+    terms: output.itinerary.items[*].cost
+    target: output.itinerary.total_cost
+    tolerance: 0.01
+
+  - id: travel.total_within_budget
+    description: The itinerary total must not exceed the trip budget.
+    predicate: lte
+    left: output.itinerary.total_cost
+    right: output.itinerary.budget_cents

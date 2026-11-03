@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from .config import Settings
+from .contracts import ContractDefinition, ContractValidationError, load_contracts_from_snapshot, persist_imported_contracts
 from .discovery import EXCLUDED_DIRS, AnalysisResult, analyze_repository, config_for_analysis, redact_source_lines
 from .integrations import SUPPORTED_INTEGRATIONS
 from .models import InstrumentationConfig, Project, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship
@@ -309,6 +310,7 @@ def process_archive(
             archive_path = Path(temporary.name)
         with archive_path.open("rb") as archive:
             safe_extract_zip(archive, root, settings)
+        contract_definitions: list[ContractDefinition] = load_contracts_from_snapshot(root)
         analysis.source_path = str(root)
         analysis.status = "analyzing"
         db.commit()
@@ -319,10 +321,11 @@ def process_archive(
         analysis.status = "partially_analyzed" if result.partially_analyzed else "analysis_complete"
         analysis.analyzed_at = datetime.utcnow()
         analysis.updated_at = datetime.utcnow()
+        persist_imported_contracts(db, project.id, analysis.id, contract_definitions)
         _mark_previous_configs_stale(db, project.id)
         db.commit()
         return analysis, False
-    except (RepositoryImportError, OSError, zipfile.BadZipFile) as exc:
+    except (RepositoryImportError, ContractValidationError, OSError, zipfile.BadZipFile) as exc:
         db.rollback()
         failed = db.get(RepositoryAnalysis, analysis.id)
         if failed:

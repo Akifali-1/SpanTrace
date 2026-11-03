@@ -14,6 +14,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from .config import get_settings
+from .contracts import (
+    ContractValidationError,
+    approved_contracts_for_execution,
+    contract_definition_from_payload,
+    contract_results_for_execution,
+    create_contract_record,
+    edit_contract_record,
+    evaluate_execution_contracts,
+    serialize_contract,
+    serialize_contract_result,
+    latest_contract,
+    latest_contracts,
+)
 from .db import Base, engine, get_db
 from .db import SessionLocal
 from .execution import ExecutionCoordinator, execution_token, input_fingerprint, serialize_execution, token_hash, redact_value, run_isolated_unittest
@@ -37,7 +50,7 @@ from .debugging import (
 from .graph import build_execution_graph
 from .incident import evaluate_incidents
 from .integrations import diagnostics_for_project
-from .models import ApiKey, DebugInvestigation, ExecutionRun, InstrumentationConfig, Project, ProposedPatch, RegressionCase, RegressionRun, RegressionTestArtifact, ReproductionAttempt, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship, RootCauseCandidate, Run, TraceEvent, VerificationRun
+from .models import ApiKey, Contract, DebugInvestigation, ExecutionRun, InstrumentationConfig, Project, ProposedPatch, RegressionCase, RegressionRun, RegressionTestArtifact, ReproductionAttempt, RepositoryAnalysis, RepositoryFinding, RepositoryRelationship, RootCauseCandidate, Run, TraceEvent, VerificationRun
 from .repository import (
     RepositoryImportError,
     fetch_public_github_archive,
@@ -50,8 +63,8 @@ from .repository import (
     serialize_config,
 )
 from .regression import run_booking_regression
-from .schemas import EventBatch, ExecutionCancel, ExecutionCreate, InstrumentationConfigSelection, InvestigationCreate, KeyCreate, PatchDecision, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, ReproductionRequest, RepositoryUrlImport, VerificationRequest, event_dict
-from .security import issue_key, project_for_key, revoke_key
+from .schemas import ContractPayload, EventBatch, ExecutionCancel, ExecutionCreate, InstrumentationConfigSelection, InvestigationCreate, KeyCreate, PatchDecision, ProjectCreate, RegressionCaseCreate, RegressionRunRequest, ReproductionRequest, RepositoryUrlImport, VerificationRequest, event_dict
+from .security import hash_api_key, issue_key, project_for_key, revoke_key
 from .serialization import iso, serialize_event, serialize_run
 
 settings = get_settings()
@@ -173,6 +186,79 @@ def get_project(project: ProjectDep, db: Db) -> dict[str, Any]:
         "created_at": iso(project.created_at),
         "keys": [{"id": key.id, "name": key.name, "prefix": key.prefix, "created_at": iso(key.created_at), "revoked_at": iso(key.revoked_at)} for key in keys],
     }
+
+
+def _contract_source_analysis(db: Session, project: Project, analysis_id: str | None) -> str | None:
+    if not analysis_id:
+        return None
+    analysis = db.scalar(select(RepositoryAnalysis).where(RepositoryAnalysis.id == analysis_id, RepositoryAnalysis.project_id == project.id))
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Repository analysis not found for this project.")
+    return analysis.id
+
+
+def _contract_definition_or_422(payload: ContractPayload):
+    try:
+        return contract_definition_from_payload(payload)
+    except ContractValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/v1/contracts")
+def list_contracts(project: ProjectDep, db: Db) -> dict[str, Any]:
+    return {"items": [serialize_contract(item) for item in latest_contracts(db, project.id)]}
+
+
+@app.post("/v1/contracts", status_code=201)
+def create_contract(payload: ContractPayload, project: ProjectDep, db: Db) -> dict[str, Any]:
+    definition = _contract_definition_or_422(payload)
+    source_analysis_id = _contract_source_analysis(db, project, payload.analysis_id)
+    try:
+        contract = create_contract_record(db, project.id, definition, source_analysis_id=source_analysis_id)
+    except ContractValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    return {"contract": serialize_contract(contract)}
+
+
+@app.put("/v1/contracts/{contract_id}")
+def edit_contract(contract_id: str, payload: ContractPayload, project: ProjectDep, db: Db) -> dict[str, Any]:
+    if payload.id != contract_id:
+        raise HTTPException(status_code=422, detail=f"Contract {contract_id}: payload id does not match the URL.")
+    definition = _contract_definition_or_422(payload)
+    current = latest_contract(db, project.id, contract_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    source_analysis_id = _contract_source_analysis(db, project, payload.analysis_id)
+    contract = edit_contract_record(db, current, definition, source_analysis_id=source_analysis_id)
+    db.commit()
+    return {"contract": serialize_contract(contract), "new_version": contract.version != current.version}
+
+
+@app.get("/v1/contracts/{contract_id}")
+def get_contract(contract_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    contract = latest_contract(db, project.id, contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    return {"contract": serialize_contract(contract)}
+
+
+@app.post("/v1/contracts/{contract_id}/approve")
+def approve_contract(contract_id: str, project: ProjectDep, db: Db, x_api_key: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+    contract = latest_contract(db, project.id, contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    if contract.status == "approved":
+        return {"contract": serialize_contract(contract), "idempotent": True}
+    if contract.status != "draft":
+        raise HTTPException(status_code=409, detail=f"Contract {contract.id}: only draft contracts can be approved.")
+    key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(x_api_key or ""), ApiKey.project_id == project.id, ApiKey.revoked_at.is_(None)))
+    contract.status = "approved"
+    contract.approved_by = key.prefix if key else "project-api-key"
+    contract.approved_at = datetime.utcnow()
+    contract.updated_at = datetime.utcnow()
+    db.commit()
+    return {"contract": serialize_contract(contract), "idempotent": False}
 
 
 @app.post("/v1/project/keys", status_code=201)
@@ -298,6 +384,17 @@ def _run_for_trace(db: Session, project_id: str, trace_id: str) -> Run | None:
     return db.scalar(select(Run).options(selectinload(Run.events)).where(Run.project_id == project_id, Run.trace_id == trace_id))
 
 
+def _serialize_investigation_with_contracts(db: Session, project_id: str, investigation: DebugInvestigation) -> dict[str, Any]:
+    contract_results: list[dict[str, Any]] = []
+    if investigation.original_execution_id:
+        execution = _execution_for_project(db, project_id, investigation.original_execution_id)
+        if execution:
+            evaluate_execution_contracts(db, execution)
+            db.commit()
+            contract_results = [serialize_contract_result(item) for item in contract_results_for_execution(db, execution.id)]
+    return serialize_investigation(investigation, contract_results=contract_results)
+
+
 def _create_debug_execution(db: Session, project: Project, original: ExecutionRun, *, source_override_path: str | None, idempotency_key: str, input_value: dict[str, Any] | None = None, source_revision: str | None = None) -> ExecutionRun:
     raw_token = execution_token()
     execution = ExecutionRun(
@@ -407,10 +504,22 @@ def get_execution(execution_id: str, project: ProjectDep, db: Db) -> dict[str, A
     execution = _execution_for_project(db, project.id, execution_id)
     if not execution:
         raise HTTPException(status_code=404, detail="Execution not found.")
+    evaluate_execution_contracts(db, execution)
+    db.commit()
     result = serialize_execution(execution)
     run = db.scalar(select(Run).where(Run.project_id == project.id, Run.trace_id == execution.trace_id))
     result["trace_available"] = run is not None
     return result
+
+
+@app.get("/v1/executions/{execution_id}/contracts")
+def get_execution_contracts(execution_id: str, project: ProjectDep, db: Db) -> dict[str, Any]:
+    execution = _execution_for_project(db, project.id, execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found.")
+    evaluate_execution_contracts(db, execution)
+    db.commit()
+    return {"items": [serialize_contract_result(item) for item in contract_results_for_execution(db, execution.id)]}
 
 
 def _create_investigation(db: Session, project: Project, payload: InvestigationCreate, *, execution: ExecutionRun | None, run: Run | None) -> DebugInvestigation:
@@ -454,7 +563,8 @@ def create_execution_investigation(execution_id: str, payload: InvestigationCrea
         raise HTTPException(status_code=404, detail="Execution not found.")
     run = _run_for_trace(db, project.id, execution.trace_id)
     investigation = _create_investigation(db, project, payload, execution=execution, run=run)
-    return {"investigation": serialize_investigation(_investigation_for_project(db, project.id, investigation.id) or investigation), "reused": investigation.created_at != investigation.updated_at}
+    refreshed = _investigation_for_project(db, project.id, investigation.id) or investigation
+    return {"investigation": _serialize_investigation_with_contracts(db, project.id, refreshed), "reused": investigation.created_at != investigation.updated_at}
 
 
 @app.post("/v1/runs/{trace_id}/investigations", status_code=201)
@@ -464,13 +574,14 @@ def create_trace_investigation(trace_id: str, payload: InvestigationCreate, proj
         raise HTTPException(status_code=404, detail="Run not found.")
     execution = db.scalar(select(ExecutionRun).where(ExecutionRun.project_id == project.id, ExecutionRun.trace_id == trace_id))
     investigation = _create_investigation(db, project, payload, execution=execution, run=run)
-    return {"investigation": serialize_investigation(_investigation_for_project(db, project.id, investigation.id) or investigation), "reused": False}
+    refreshed = _investigation_for_project(db, project.id, investigation.id) or investigation
+    return {"investigation": _serialize_investigation_with_contracts(db, project.id, refreshed), "reused": False}
 
 
 @app.get("/v1/investigations")
 def list_investigations(project: ProjectDep, db: Db, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
     investigations = db.scalars(select(DebugInvestigation).where(DebugInvestigation.project_id == project.id).order_by(DebugInvestigation.created_at.desc()).limit(limit)).all()
-    return {"items": [serialize_investigation(_investigation_for_project(db, project.id, item.id) or item) for item in investigations]}
+    return {"items": [_serialize_investigation_with_contracts(db, project.id, _investigation_for_project(db, project.id, item.id) or item) for item in investigations]}
 
 
 @app.get("/v1/investigations/{investigation_id}")
@@ -484,7 +595,7 @@ def get_investigation(investigation_id: str, project: ProjectDep, db: Db) -> dic
         _sync_verification(db, investigation, verification)
     db.commit()
     refreshed = _investigation_for_project(db, project.id, investigation_id)
-    return serialize_investigation(refreshed or investigation)
+    return _serialize_investigation_with_contracts(db, project.id, refreshed or investigation)
 
 
 @app.post("/v1/investigations/{investigation_id}/reproduction", status_code=202)
@@ -542,9 +653,30 @@ def generate_regression_test(investigation_id: str, project: ProjectDep, db: Db)
         return {"test": serialize_regression_test(existing), "reused": True}
     original = _execution_for_project(db, project.id, investigation.original_execution_id) if investigation.original_execution_id else None
     analysis = db.get(RepositoryAnalysis, investigation.analysis_id) if investigation.analysis_id else None
-    definition = build_regression_test(analysis, original, investigation.id)
+    run = _run_for_trace(db, project.id, investigation.original_trace_id)
+    approved = approved_contracts_for_execution(db, original) if original else []
+    contract = None
+    blocked_reason = None
+    if approved and original:
+        outcomes = evaluate_execution_contracts(db, original)
+        db.commit()
+        failed_ids = {item.contract_record_id for item in outcomes if item.status == "fail"}
+        contract = next((item for item in approved if item.record_id in failed_ids), None)
+        if contract is None:
+            inconclusive = next((item.reason for item in outcomes if item.status == "inconclusive" and item.reason), None)
+            blocked_reason = inconclusive or "No approved contract failed for the recorded execution output."
+    definition = build_regression_test(analysis, original, investigation.id, contract=contract, run=run) if contract else (None if approved else build_regression_test(analysis, original, investigation.id))
+    if definition and definition.get("blocked_reason"):
+        blocked_reason = str(definition["blocked_reason"])
     if not definition:
-        artifact = RegressionTestArtifact(investigation_id=investigation.id, source_revision=investigation.source_revision, file_path="unavailable", code="", description="A deterministic regression test could not be generated from the available source contract.", input_json=redact_value(original.input_json if original else {}), expected_json={}, source_evidence_json=[], assumptions_json=["A supported deterministic test template and source snapshot are required."], status="blocked", original_result_json={"status": "blocked", "reason": "Insufficient source evidence."}, patched_result_json={})
+        artifact = RegressionTestArtifact(investigation_id=investigation.id, source_revision=investigation.source_revision, file_path="unavailable", code="", description="A deterministic regression test could not be generated from the available source contract.", input_json=redact_value(original.input_json if original else {}), expected_json={}, source_evidence_json=[], assumptions_json=["A supported deterministic test template and source snapshot are required."], status="blocked", original_result_json={"status": "blocked", "reason": blocked_reason or "Insufficient source evidence."}, patched_result_json={})
+        db.add(artifact)
+        if investigation.status not in {"blocked", "verified", "failed", "cancelled"}:
+            transition_investigation(investigation, "blocked")
+        db.commit()
+        return {"test": serialize_regression_test(artifact)}
+    if blocked_reason:
+        artifact = RegressionTestArtifact(investigation_id=investigation.id, contract_record_id=contract.record_id if contract else None, source_revision=investigation.source_revision, file_path="unavailable", code="", description="A deterministic regression test could not be generated from the approved contract.", input_json=redact_value(original.input_json if original else {}), expected_json={"contract_id": contract.id} if contract else {}, source_evidence_json=[], assumptions_json=[blocked_reason], status="blocked", original_result_json={"status": "blocked", "reason": blocked_reason}, patched_result_json={})
         db.add(artifact)
         if investigation.status not in {"blocked", "verified", "failed", "cancelled"}:
             transition_investigation(investigation, "blocked")
@@ -556,9 +688,9 @@ def generate_regression_test(investigation_id: str, project: ProjectDep, db: Db)
     _write_generated_test(workspace, definition["file_path"], definition["code"])
     result = run_isolated_unittest(settings, workspace, definition["file_path"])
     result_text = str(result).lower()
-    intended_failure = result.get("status") == "failed" and any(str(value).lower() in result_text for value in definition["expected_json"].values())
+    intended_failure = result.get("status") == "failed" if definition.get("contract_id") else result.get("status") == "failed" and any(str(value).lower() in result_text for value in definition["expected_json"].values())
     status_value = "validated" if intended_failure else "rejected" if result.get("status") == "passed" or result.get("status") == "failed" else "blocked"
-    artifact = RegressionTestArtifact(investigation_id=investigation.id, candidate_id=investigation.candidates[0].id if investigation.candidates else None, source_revision=investigation.source_revision, file_path=definition["file_path"], code=definition["code"], description=definition["description"], input_json=definition["input_json"], expected_json=definition["expected_json"], source_evidence_json=[serialize_candidate(investigation.candidates[0])] if investigation.candidates else [], assumptions_json=definition["assumptions"], workspace_path=str(workspace), status=status_value, original_result_json=redact_value(result), patched_result_json={})
+    artifact = RegressionTestArtifact(investigation_id=investigation.id, candidate_id=investigation.candidates[0].id if investigation.candidates else None, contract_record_id=contract.record_id if contract else None, source_revision=investigation.source_revision, file_path=definition["file_path"], code=definition["code"], description=definition["description"], input_json=definition["input_json"], expected_json=definition["expected_json"], source_evidence_json=[serialize_candidate(investigation.candidates[0])] if investigation.candidates else [], assumptions_json=definition["assumptions"], workspace_path=str(workspace), status=status_value, original_result_json=redact_value(result), patched_result_json={})
     db.add(artifact)
     if status_value == "validated":
         transition_investigation(investigation, "test_generated") if investigation.status in {"open", "reproducing", "inconclusive", "blocked"} else None
@@ -596,7 +728,7 @@ def propose_patch(investigation_id: str, project: ProjectDep, db: Db) -> dict[st
 
 
 @app.post("/v1/investigations/{investigation_id}/patches/{patch_id}/decision")
-def decide_patch(investigation_id: str, patch_id: str, payload: PatchDecision, project: ProjectDep, db: Db) -> dict[str, Any]:
+def decide_patch(investigation_id: str, patch_id: str, payload: PatchDecision, project: ProjectDep, db: Db, x_api_key: Annotated[str | None, Header()] = None) -> dict[str, Any]:
     investigation = _investigation_for_project(db, project.id, investigation_id)
     if not investigation:
         raise HTTPException(status_code=404, detail="Investigation not found.")
@@ -605,9 +737,17 @@ def decide_patch(investigation_id: str, patch_id: str, payload: PatchDecision, p
         raise HTTPException(status_code=404, detail="Proposed patch not found.")
     if patch.status not in {"pending_review", "approved", "rejected"}:
         raise HTTPException(status_code=409, detail="This patch can no longer be reviewed.")
+    if patch.status == "approved":
+        if payload.decision == "approved":
+            return {"patch": serialize_patch(patch), "applied_to_original_repository": False, "message": "The patch approval was already recorded."}
+        raise HTTPException(status_code=409, detail="The proposed patch is already approved and cannot be rejected.")
     patch.decision = payload.decision
     patch.decided_at = datetime.utcnow()
     patch.status = payload.decision
+    if payload.decision == "approved":
+        key = db.scalar(select(ApiKey).where(ApiKey.key_hash == hash_api_key(x_api_key or ""), ApiKey.project_id == project.id, ApiKey.revoked_at.is_(None)))
+        patch.approved_by = key.prefix if key else "project-api-key"
+        patch.approved_at = datetime.utcnow()
     if payload.decision == "rejected" and investigation.status == "patch_proposed":
         transition_investigation(investigation, "open")
     db.commit()
@@ -626,6 +766,8 @@ def verify_investigation(investigation_id: str, payload: VerificationRequest, pr
         raise HTTPException(status_code=409, detail="A proposed patch and generated regression test are required before verification.")
     if artifact.status != "validated":
         raise HTTPException(status_code=409, detail="The regression test did not validate the original failure; verification cannot proceed.")
+    if patch.status != "approved":
+        raise HTTPException(status_code=409, detail="The proposed patch must be approved before verification.")
     if not original:
         verification = VerificationRun(investigation_id=investigation.id, patch_id=patch.id, regression_test_id=artifact.id, original_trace_id=investigation.original_trace_id, status="inconclusive", original_test_json=artifact.original_result_json or {}, patched_test_json={}, existing_tests_json={}, command_results_json=[], report_json={"reason": "The original trace has no controlled execution to rerun."}, error_message="Controlled rerun is unavailable for a trace-only investigation.")
         db.add(verification)
@@ -634,8 +776,6 @@ def verify_investigation(investigation_id: str, payload: VerificationRequest, pr
         return {"verification": serialize_verification(verification)}
     if not payload.run_controlled_rerun:
         raise HTTPException(status_code=422, detail="A controlled rerun is required to mark a fix verified.")
-    if patch.status == "rejected":
-        raise HTTPException(status_code=409, detail="The proposed patch was rejected and cannot be verified.")
     transition_investigation(investigation, "verifying") if investigation.status in {"patch_proposed", "open", "inconclusive", "blocked"} else None
     verification = VerificationRun(investigation_id=investigation.id, patch_id=patch.id, regression_test_id=artifact.id, original_execution_id=original.id, original_trace_id=investigation.original_trace_id, status="running", started_at=datetime.utcnow(), original_test_json={}, patched_test_json={}, existing_tests_json={}, command_results_json=[], report_json={})
     db.add(verification)

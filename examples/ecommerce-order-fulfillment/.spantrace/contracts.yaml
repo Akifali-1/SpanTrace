@@ -1,0 +1,8 @@
+contracts:
+  - id: order.discount_applied_once
+    description: The order total must equal subtotal minus discount.
+    predicate: difference_equals
+    minuend: output.subtotal_cents
+    subtrahend: output.discount_cents
+    target: output.total_cents
+    tolerance: 0.01

@@ -81,6 +81,16 @@ class VerificationRequest(BaseModel):
     run_controlled_rerun: bool = True
 
 
+class ContractPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=2000)
+    predicate: str = Field(min_length=1, max_length=48)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    analysis_id: str | None = Field(default=None, max_length=36)
+
+
 class RepositoryUrlImport(BaseModel):
     url: str = Field(min_length=1, max_length=500)
     ref: str | None = Field(default=None, max_length=200)
